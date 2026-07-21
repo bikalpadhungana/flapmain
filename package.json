@@ -1,0 +1,25 @@
+{
+  "name": "flapmain",
+  "version": "1.0.0",
+  "description": "FlapMain IoT ingestion and management platform",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "install:all": "npm install",
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "seed": "npm run seed --workspace=backend",
+    "verify": "npm run verify --workspace=backend",
+    "test:api": "npm run test:api --workspace=backend",
+    "lint": "npm run lint --workspaces",
+    "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,md}\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "prettier": "^3.2.5"
+  }
+}

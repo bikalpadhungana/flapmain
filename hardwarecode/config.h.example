@@ -1,0 +1,24 @@
+/*
+ * =====================================================================
+ * FlapMain IoT Platform - Hardware Configuration File Header
+ * =====================================================================
+ */
+
+#ifndef FLAPMAIN_CONFIG_H
+#define FLAPMAIN_CONFIG_H
+
+// --- Wi-Fi Network Credentials ---
+#define WIFI_SSID       "Your_WiFi_SSID"
+#define WIFI_PASSWORD   "Your_WiFi_Password"
+
+// --- FlapMain Backend API Connection (Local LAN IP: 192.168.1.80, Port: 5055) ---
+#define FLAPMAIN_SERVER "http://192.168.1.80:5055"
+
+// --- Device Provisioning Credentials (from Dashboard) ---
+#define DEVICE_ID       "flap-ultrasonic-a1b2"
+#define DEVICE_KEY      "flap_dev_your_generated_device_api_key"
+
+// --- Sensor Read Interval (in milliseconds) ---
+#define TELEMETRY_INTERVAL_MS 3000 // Send telemetry reading every 3 seconds
+
+#endif // FLAPMAIN_CONFIG_H

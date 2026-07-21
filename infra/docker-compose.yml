@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: flapmain_mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+  emqx:
+    image: emqx:5.3.0
+    container_name: flapmain_emqx
+    ports:
+      - "1883:1883"      # MQTT TCP
+      - "8083:8083"      # MQTT WebSocket
+      - "8084:8084"      # MQTT WebSocket Secure
+      - "18083:18083"    # EMQX Dashboard
+    volumes:
+      - emqx_data:/opt/emqx/data
+      - emqx_log:/opt/emqx/log
+    environment:
+      - EMQX_DASHBOARD__BOOTSTRAP_USER_LIST=[{username: "admin", password: "public_password"}]
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
+  emqx_data:
+  emqx_log:

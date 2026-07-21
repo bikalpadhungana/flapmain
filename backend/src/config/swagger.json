@@ -1,0 +1,167 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "FlapMain Central IoT Platform API",
+    "version": "1.0.0",
+    "description": "API Documentation for FlapMain Central IoT Ingestion, Registry, and Alerts platform."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5050",
+      "description": "Local Development Server"
+    }
+  ],
+  "paths": {
+    "/v1/auth/login": {
+      "post": {
+        "summary": "Authenticate user & get token",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": { "type": "string" },
+                  "password": { "type": "string" }
+                },
+                "required": ["email", "password"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Successfully authenticated" },
+          "401": { "description": "Invalid credentials" }
+        }
+      }
+    },
+    "/v1/devices": {
+      "post": {
+        "summary": "Register a new device",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "device_id": { "type": "string" },
+                  "device_type": { "type": "string" },
+                  "name": { "type": "string" },
+                  "location": { "type": "string" }
+                },
+                "required": ["device_id", "device_type", "name"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Device registered successfully" }
+        }
+      },
+      "get": {
+        "summary": "List all active devices scoped to organization",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "List of devices" }
+        }
+      }
+    },
+    "/v1/devices/{device_id}/readings": {
+      "post": {
+        "summary": "REST fallback telemetry ingestion (Hardware Client)",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "x-device-key",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Telemetry logged" }
+        }
+      },
+      "get": {
+        "summary": "Get readings logs list",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Array of logs" }
+        }
+      }
+    },
+    "/v1/devices/{device_id}/commands": {
+      "post": {
+        "summary": "Trigger actuator command (publish to MQTT)",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "command": { "type": "string" },
+                  "payload": { "type": "object" }
+                },
+                "required": ["command"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Command published successfully" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  }
+}
