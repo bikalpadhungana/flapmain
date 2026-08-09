@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Bell, Trash2, Cpu, Check, AlertTriangle } from 'lucide-react';
 import { API_BASE_URL } from '../config';
+import ConfirmModal from '../components/ConfirmModal';
 
 function AlertRules() {
   const navigate = useNavigate();
@@ -22,6 +23,8 @@ function AlertRules() {
   
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  
+  const [confirmModal, setConfirmModal] = useState({ isOpen: false, ruleId: null });
 
   useEffect(() => {
     if (!token) {
@@ -127,8 +130,13 @@ function AlertRules() {
     }
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm('Are you sure you want to delete this alert rule?')) return;
+  const handleDeleteClick = (id) => {
+    setConfirmModal({ isOpen: true, ruleId: id });
+  };
+
+  const handleDeleteConfirm = async () => {
+    const id = confirmModal.ruleId;
+    if (!id) return;
 
     try {
       const response = await fetch(`${API_BASE_URL}/v1/alerts/rules/${id}`, {
@@ -145,43 +153,47 @@ function AlertRules() {
   };
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '30px', textAlign: 'left' }}>
-      <header>
-        <h1 style={{ fontSize: '2rem', fontWeight: '700' }}>Alert Settings</h1>
-        <p style={{ color: 'var(--text-secondary)' }}>Compile real-time threshold conditions and trigger actuator signals or webhooks.</p>
+    <div className="flex flex-col gap-6 flex-1 h-full">
+      <header className="flex justify-between items-center">
+        <div>
+          <h1 className="text-main" style={{ fontSize: '1.75rem', fontWeight: 600, letterSpacing: '-0.02em' }}>Alert Settings</h1>
+          <p className="text-muted text-sm mt-1">Compile real-time threshold conditions and trigger actuator signals or webhooks.</p>
+        </div>
       </header>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '30px', alignItems: 'start' }}>
+      <div className="grid" style={{ gridTemplateColumns: '1.2fr 0.8fr', gap: 'var(--space-6)', alignItems: 'start' }}>
         {/* Rules listing */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <h3 style={{ fontSize: '1.25rem' }}>Active Rules ({rules.length})</h3>
+        <div className="flex flex-col gap-4">
+          <h3 style={{ fontSize: '1.125rem' }}>Active Rules ({rules.length})</h3>
           {loading ? (
-            <div style={{ color: 'var(--text-muted)' }}>Loading rules...</div>
+            <div className="text-muted text-sm">Loading rules...</div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div className="flex flex-col gap-4">
               {rules.map((r) => (
-                <div key={r._id} className="glass-panel" style={{ padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                  <div style={{ display: 'flex', gap: '12px', alignItems: 'start' }}>
-                    <div style={{ background: 'var(--danger-glow)', borderRadius: '8px', padding: '8px' }}>
-                      <AlertTriangle size={18} color="var(--danger)" />
+                <div key={r._id} className="card card-body flex justify-between items-start">
+                  <div className="flex gap-3 items-start">
+                    <div className="p-2 rounded bg-red-50 text-error" style={{ background: 'var(--status-error-bg)' }}>
+                      <AlertTriangle size={18} />
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                      <h4 style={{ fontSize: '1.05rem', fontWeight: '600' }}>
-                        Device: <code style={{ fontSize: '0.85rem' }}>{r.device_id}</code>
+                    <div className="flex flex-col gap-1 text-sm">
+                      <h4 className="font-medium text-main m-0">
+                        Device: <code className="text-mono text-muted text-xs bg-gray-50 border border-subtle px-1 rounded">{r.device_id}</code>
                       </h4>
-                      <p style={{ fontSize: '0.9rem', color: 'var(--text-primary)', marginTop: '4px' }}>
-                        IF <strong>{r.condition.field}</strong> {r.condition.operator} <strong>{String(r.condition.value)}</strong>
+                      <p className="m-0 mt-1">
+                        <span className="text-dim">IF</span> <strong className="text-main">{r.condition.field}</strong> <span className="text-accent font-mono mx-1">{r.condition.operator}</span> <strong className="text-main">{String(r.condition.value)}</strong>
                       </p>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                        THEN trigger <strong>{r.action.type}</strong> ➜ <code style={{ fontSize: '0.75rem' }}>{r.action.target}</code>
+                      <p className="text-xs text-muted m-0 mt-1">
+                        <span className="text-dim">THEN trigger</span> <strong className="text-main">{r.action.type}</strong> &rarr; <code className="text-mono bg-gray-50 border border-subtle px-1 rounded truncate max-w-[200px] inline-block align-bottom">{r.action.target}</code>
                       </p>
                     </div>
                   </div>
 
                   <button
-                    onClick={() => handleDelete(r._id)}
-                    className="btn btn-secondary"
-                    style={{ padding: '6px', borderRadius: '4px', color: 'var(--danger)', borderColor: 'transparent' }}
+                    onClick={() => handleDeleteClick(r._id)}
+                    className="btn btn-icon text-muted"
+                    style={{ background: 'transparent' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--status-error)' }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)' }}
                   >
                     <Trash2 size={16} />
                   </button>
@@ -192,113 +204,123 @@ function AlertRules() {
         </div>
 
         {/* Rule Compiler Form */}
-        <div className="glass-panel" style={{ padding: '24px' }}>
-          <h3 style={{ fontSize: '1.25rem', marginBottom: '16px' }}>Compile Alert Rule</h3>
-          {error && <p style={{ color: 'var(--danger)', fontSize: '0.85rem', marginBottom: '12px' }}>{error}</p>}
-          {success && <p style={{ color: 'var(--success)', fontSize: '0.85rem', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}><Check size={14}/> {success}</p>}
+        <div className="card">
+          <div className="card-header">
+            <h3 style={{ fontSize: '1.125rem' }}>Compile Alert Rule</h3>
+          </div>
+          <div className="card-body">
+            {error && <p className="text-error text-sm mb-3">{error}</p>}
+            {success && <p className="text-success text-sm mb-3 flex items-center gap-2"><Check size={14}/> {success}</p>}
 
-          <form onSubmit={handleCreateRule} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div className="form-group">
-              <label className="form-label">Target Device</label>
-              <select
-                className="form-input"
-                style={{ background: 'var(--bg-secondary)', height: '46px' }}
-                value={selectedDevice}
-                onChange={e => setSelectedDevice(e.target.value)}
-                required
-              >
-                <option value="" disabled>Select device</option>
-                {devices.map(d => (
-                  <option key={d.device_id} value={d.device_id}>
-                    {d.name} ({d.device_id})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Condition Row */}
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <div className="form-group" style={{ flex: 2 }}>
-                <label className="form-label">Telemetry Parameter</label>
+            <form onSubmit={handleCreateRule} className="flex flex-col gap-4">
+              <div className="form-group mb-0">
+                <label className="form-label">Target Device</label>
                 <select
-                  className="form-input"
-                  style={{ background: 'var(--bg-secondary)', height: '46px' }}
-                  value={selectedField}
-                  onChange={e => setSelectedField(e.target.value)}
+                  className="form-input form-select"
+                  value={selectedDevice}
+                  onChange={e => setSelectedDevice(e.target.value)}
                   required
                 >
-                  <option value="" disabled>Select field</option>
-                  {getFieldsForSelectedDevice().map(f => (
-                    <option key={f} value={f}>{f}</option>
+                  <option value="" disabled>Select device</option>
+                  {devices.map(d => (
+                    <option key={d.device_id} value={d.device_id}>
+                      {d.name} ({d.device_id})
+                    </option>
                   ))}
                 </select>
               </div>
 
-              <div className="form-group" style={{ flex: 1 }}>
-                <label className="form-label">Operator</label>
+              {/* Condition Row */}
+              <div className="flex gap-3">
+                <div className="form-group mb-0 flex-1" style={{ flex: 2 }}>
+                  <label className="form-label">Telemetry Parameter</label>
+                  <select
+                    className="form-input form-select"
+                    value={selectedField}
+                    onChange={e => setSelectedField(e.target.value)}
+                    required
+                  >
+                    <option value="" disabled>Select field</option>
+                    {getFieldsForSelectedDevice().map(f => (
+                      <option key={f} value={f}>{f}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="form-group mb-0 flex-1">
+                  <label className="form-label">Operator</label>
+                  <select
+                    className="form-input form-select font-mono"
+                    value={operator}
+                    onChange={e => setOperator(e.target.value)}
+                    required
+                  >
+                    <option value=">">&gt;</option>
+                    <option value="<">&lt;</option>
+                    <option value="==">==</option>
+                    <option value="!=">!=</option>
+                  </select>
+                </div>
+
+                <div className="form-group mb-0 flex-1" style={{ flex: 2.5 }}>
+                  <label className="form-label">Threshold Value</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. 80 or true"
+                    value={value}
+                    onChange={e => setValue(e.target.value)}
+                    required
+                  />
+                </div>
+              </div>
+
+              {/* Action configs */}
+              <div className="form-group mb-0">
+                <label className="form-label">Action Signal Type</label>
                 <select
-                  className="form-input"
-                  style={{ background: 'var(--bg-secondary)', height: '46px' }}
-                  value={operator}
-                  onChange={e => setOperator(e.target.value)}
+                  className="form-input form-select"
+                  value={actionType}
+                  onChange={e => setActionType(e.target.value)}
                   required
                 >
-                  <option value=">">&gt;</option>
-                  <option value="<">&lt;</option>
-                  <option value="==">==</option>
-                  <option value="!=">!=</option>
+                  <option value="webhook">webhook (Post JSON to endpoint)</option>
+                  <option value="actuator">actuator (Trigger device command)</option>
                 </select>
               </div>
 
-              <div className="form-group" style={{ flex: 2.5 }}>
-                <label className="form-label">Threshold Value</label>
+              <div className="form-group mb-0">
+                <label className="form-label">
+                  {actionType === 'webhook' ? 'Webhook Endpoint URL' : 'Device Command Signal'}
+                </label>
                 <input
                   type="text"
                   className="form-input"
-                  placeholder="e.g. 80 or true"
-                  value={value}
-                  onChange={e => setValue(e.target.value)}
+                  placeholder={actionType === 'webhook' ? 'http://example.com/alert' : 'e.g. set_actuator'}
+                  value={actionTarget}
+                  onChange={e => setActionTarget(e.target.value)}
                   required
                 />
               </div>
-            </div>
 
-            {/* Action configs */}
-            <div className="form-group">
-              <label className="form-label">Action Signal Type</label>
-              <select
-                className="form-input"
-                style={{ background: 'var(--bg-secondary)', height: '46px' }}
-                value={actionType}
-                onChange={e => setActionType(e.target.value)}
-                required
-              >
-                <option value="webhook">webhook (Post JSON to endpoint)</option>
-                <option value="actuator">actuator (Trigger device command)</option>
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">
-                {actionType === 'webhook' ? 'Webhook Endpoint URL' : 'Device Command Signal'}
-              </label>
-              <input
-                type="text"
-                className="form-input"
-                placeholder={actionType === 'webhook' ? 'http://example.com/alert' : 'e.g. set_actuator'}
-                value={actionTarget}
-                onChange={e => setActionTarget(e.target.value)}
-                required
-              />
-            </div>
-
-            <button type="submit" className="btn btn-primary" style={{ width: '100%', marginTop: '10px' }}>
-              <Plus size={14} />
-              <span>Register Alert Rule</span>
-            </button>
-          </form>
+              <button type="submit" className="btn btn-primary w-full mt-2" style={{ padding: '0.625rem 1rem' }}>
+                <Plus size={14} />
+                <span>Register Alert Rule</span>
+              </button>
+            </form>
+          </div>
         </div>
       </div>
+      
+      <ConfirmModal
+        isOpen={confirmModal.isOpen}
+        onClose={() => setConfirmModal({ isOpen: false, ruleId: null })}
+        onConfirm={handleDeleteConfirm}
+        title="Delete Alert Rule"
+        message={<><strong>Are you sure you want to delete this alert rule?</strong><br/><br/>It will stop triggering actions.</>}
+        confirmText="Delete Rule"
+        type="danger"
+      />
     </div>
   );
 }

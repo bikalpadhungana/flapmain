@@ -1,6 +1,40 @@
 import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Database, Key, Bell, LogOut, Radio } from 'lucide-react';
+import {
+  LayoutDashboard, Database, Key, Bell, LogOut, Terminal,
+  Server, Activity, Link2, Settings
+} from 'lucide-react';
+
+const NAV_SECTIONS = [
+  {
+    label: 'Monitoring',
+    items: [
+      { name: 'Fleet Overview', path: '/', icon: LayoutDashboard },
+      { name: 'System Monitor', path: '/system-monitor', icon: Server },
+      { name: 'Scale Monitor', path: '/scale-monitor', icon: Activity },
+    ],
+  },
+  {
+    label: 'IoT Management',
+    items: [
+      { name: 'Sensor Fusion', path: '/fusion', icon: Link2 },
+      { name: 'Hardware & Devices', path: '/devices', icon: Database },
+    ],
+  },
+  {
+    label: 'Configuration',
+    items: [
+      { name: 'API Integrations', path: '/api-keys', icon: Key },
+      { name: 'Alert Settings', path: '/alerts', icon: Bell },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { name: 'Activity Logs', path: '/logs', icon: Terminal },
+    ],
+  },
+];
 
 function Sidebar() {
   const location = useLocation();
@@ -12,72 +46,59 @@ function Sidebar() {
     navigate('/login');
   };
 
-  const navItems = [
-    { name: 'Devices Dashboard', path: '/', icon: LayoutDashboard },
-    { name: 'Schema Registry', path: '/registry', icon: Database },
-    { name: 'API Integrations', path: '/api-keys', icon: Key },
-    { name: 'Alert Settings', path: '/alerts', icon: Bell },
-  ];
-
   return (
-    <aside className="glass-panel" style={{ width: '260px', height: 'calc(100vh - 48px)', padding: '24px', display: 'flex', flexDirection: 'column', gap: '30px', position: 'sticky', top: '24px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', paddingBottom: '16px', borderBottom: '1px solid var(--card-border)' }}>
-        <img src="/flapmainlogo.png" alt="FlapMain Logo" style={{ height: '40px', width: 'auto', objectFit: 'contain' }} />
+    <aside className="sidebar-container">
+      {/* Logo */}
+      <div className="sidebar-header">
+        <img src="/flapmainlogo.png" alt="FlapMain Logo" style={{ height: '32px', width: 'auto', objectFit: 'contain' }} />
         <div>
-          <h2 style={{ fontSize: '1.25rem', fontWeight: '700', margin: 0, background: 'linear-gradient(to right, #1f74b5, #3892d6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+          <h2 style={{ fontSize: '1.125rem', fontWeight: '700', margin: 0, color: 'var(--text-main)', letterSpacing: '-0.02em' }}>
             FlapMain
           </h2>
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>IoT Administration</span>
+          <span className="text-xs text-muted" style={{ fontWeight: 500 }}>IoT Platform</span>
         </div>
       </div>
 
-      <nav style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          const isActive = location.pathname === item.path;
-
-          return (
-            <Link
-              key={item.path}
-              to={item.path}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '12px',
-                padding: '12px 16px',
-                borderRadius: 'var(--radius-sm)',
-                textDecoration: 'none',
-                color: isActive ? '#fff' : 'var(--text-secondary)',
-                background: isActive ? 'var(--accent)' : 'transparent',
-                border: isActive ? '1px solid rgba(255,255,255,0.1)' : '1px solid transparent',
-                transition: 'var(--transition-smooth)',
-                fontWeight: isActive ? '600' : '400',
-              }}
-              className={isActive ? '' : 'glass-panel-hover'}
-            >
-              <Icon size={18} />
-              <span>{item.name}</span>
-            </Link>
-          );
-        })}
+      {/* Nav sections */}
+      <nav style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: 'var(--space-2)', flex: 1, overflowY: 'auto' }}>
+        {NAV_SECTIONS.map((section) => (
+          <div key={section.label} style={{ marginBottom: 6 }}>
+            <div style={{
+              fontSize: '0.62rem', fontWeight: 800, letterSpacing: '0.1em',
+              textTransform: 'uppercase', color: 'var(--text-muted)',
+              padding: '8px 10px 4px',
+              opacity: 0.7,
+            }}>
+              {section.label}
+            </div>
+            {section.items.map((item) => {
+              const Icon = item.icon;
+              const isActive = location.pathname === item.path;
+              return (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  className={`nav-link ${isActive ? 'active' : ''}`}
+                >
+                  <Icon className="nav-icon" size={17} />
+                  <span className="nav-text">{item.name}</span>
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
-      <button
-        onClick={handleLogout}
-        className="btn btn-secondary"
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: '10px',
-          borderColor: 'rgba(239, 68, 68, 0.2)',
-          color: 'var(--danger)',
-        }}
-      >
-        <LogOut size={16} />
-        <span>Log Out</span>
-      </button>
+      {/* Logout */}
+      <div className="sidebar-logout">
+        <button
+          onClick={handleLogout}
+          className="btn btn-secondary w-full justify-center text-dim"
+        >
+          <LogOut size={16} />
+          <span>Log Out</span>
+        </button>
+      </div>
     </aside>
   );
 }

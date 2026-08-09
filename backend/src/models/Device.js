@@ -40,6 +40,11 @@ const DeviceSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    activation_status: {
+      type: String,
+      enum: ['pending', 'active', 'suspended'],
+      default: 'pending',
+    },
   },
   {
     timestamps: true,

@@ -17,7 +17,10 @@ const initMqttIngestion = () => {
     password,
     clientId: 'flapmain_ingest_service_' + Math.random().toString(16).substring(2, 8),
     clean: true,
+    reconnectPeriod: 15000,
+    connectTimeout: 3000,
   });
+
 
   client.on('connect', () => {
     console.log('Successfully connected to MQTT Broker!');

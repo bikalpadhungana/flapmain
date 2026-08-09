@@ -57,4 +57,42 @@ router.post('/', authenticateUser, authorizeRole('admin'), async (req, res) => {
   }
 });
 
+// @route   PUT /v1/device-types/:device_type
+// @desc    Edit device type schema
+// @access  Private (Admin users only)
+router.put('/:device_type', authenticateUser, authorizeRole('admin'), async (req, res) => {
+  const { display_name, fields, commands } = req.body;
+
+  if (!display_name || !fields) {
+    return res.status(400).json({ message: 'Please enter display_name and fields schema definition' });
+  }
+
+  try {
+    const existingType = await DeviceType.findOne({ device_type: req.params.device_type.toLowerCase() });
+    if (!existingType) {
+      return res.status(404).json({ message: 'Device type schema not found' });
+    }
+
+    // Basic structure validation of fields
+    for (const [key, val] of Object.entries(fields)) {
+      if (!val.type || !['number', 'boolean', 'string'].includes(val.type)) {
+        return res.status(400).json({
+          message: `Field '${key}' has invalid definition. 'type' is required and must be 'number', 'boolean', or 'string'`
+        });
+      }
+    }
+
+    existingType.display_name = display_name;
+    existingType.fields = fields;
+    existingType.commands = commands || [];
+
+    await existingType.save();
+
+    res.json(existingType);
+  } catch (error) {
+    console.error('Update device schema error:', error);
+    res.status(500).json({ message: 'Server error updating device type schema' });
+  }
+});
+
 module.exports = router;

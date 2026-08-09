@@ -79,15 +79,26 @@ function DeviceDetail() {
 
   const loadReadings = async () => {
     try {
+      // 1. Fetch latest telemetry readings
       const res = await fetch(`${API_BASE_URL}/v1/devices/${device_id}/readings?limit=${limit}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
       setReadings(Array.isArray(data) ? data : []);
+
+      // 2. Fetch updated device metadata (status & last_seen timestamp)
+      const devRes = await fetch(`${API_BASE_URL}/v1/devices/${device_id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (devRes.ok) {
+        const devData = await devRes.json();
+        setDevice(devData);
+      }
     } catch (err) {
-      console.error('Error polling readings:', err);
+      console.error('Error polling readings and device info:', err);
     }
   };
+
 
   const handleSendCommand = async (e) => {
     e.preventDefault();
@@ -129,10 +140,22 @@ function DeviceDetail() {
 #define WIFI_SSID "Your_WiFi_SSID"
 #define WIFI_PASSWORD "Your_WiFi_Password"
 
-#define FLAPMAIN_SERVER "${API_BASE_URL}"
+#define FLAPMAIN_SERVER "${API_BASE_URL.replace(/\/api$/, '')}"
 #define FLAPMAIN_DEVICE_ID "${device_id}"
 #define FLAPMAIN_DEVICE_KEY "YOUR_DEVICE_API_KEY" // (Generated at provision time)
 `;
+
+  const handleDownloadConfig = () => {
+    const blob = new Blob([configSnippet], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `config_${device_id}.h`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const copyConfig = () => {
     navigator.clipboard.writeText(configSnippet);
@@ -142,8 +165,8 @@ function DeviceDetail() {
 
   if (loading) {
     return (
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <RefreshCw className="animate-spin" size={32} color="var(--accent)" />
+      <div className="flex-1 flex items-center justify-center">
+        <RefreshCw className="animate-spin text-accent" size={32} />
       </div>
     );
   }
@@ -161,73 +184,87 @@ function DeviceDetail() {
   const exportUrl = (format) => `${API_BASE_URL}/v1/devices/${device_id}/export?format=${format}`;
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '30px', textAlign: 'left' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <button onClick={() => navigate('/')} className="btn btn-secondary" style={{ padding: '8px' }}>
+    <div className="flex flex-col gap-6 flex-1 h-full">
+      <div className="flex justify-between items-center">
+        <div className="flex items-center gap-4">
+          <button onClick={() => navigate('/')} className="btn btn-secondary btn-icon">
             <ArrowLeft size={18} />
           </button>
           <div>
-            <h1 style={{ fontSize: '1.75rem', fontWeight: '700', margin: 0 }}>{device?.name}</h1>
-            <code style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>ID: {device?.device_id} • Schema: {device?.device_type}</code>
+            <h1 className="text-main m-0" style={{ fontSize: '1.5rem', fontWeight: 600, letterSpacing: '-0.02em' }}>{device?.name}</h1>
+            <code className="text-muted text-xs">ID: {device?.device_id} • Schema: {device?.device_type}</code>
           </div>
         </div>
 
-        <button onClick={() => setShowConfig(!showConfig)} className="btn btn-secondary">
-          <Cpu size={16} />
+        <button onClick={() => setShowConfig(!showConfig)} className="btn btn-secondary btn-sm">
+          <Cpu size={14} />
           <span>{showConfig ? 'Hide Hardware Code' : 'Hardware C++ Code Config'}</span>
         </button>
       </div>
 
       {/* Hardware C++ Header Code Modal */}
       {showConfig && (
-        <div className="glass-panel" style={{ padding: '20px', borderLeft: '4px solid var(--accent)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-            <h4 style={{ fontSize: '1rem', color: 'var(--accent)', fontWeight: '600' }}>
-              Arduino C++ Configuration Header (config.h)
-            </h4>
-            <button onClick={copyConfig} className="btn btn-primary" style={{ padding: '4px 12px', fontSize: '0.8rem' }}>
-              {copied ? <Check size={12} /> : <Copy size={12} />}
-              <span>{copied ? 'Copied!' : 'Copy Code'}</span>
-            </button>
+        <div className="premium-card animate-slide-up mb-6" style={{ borderLeft: '4px solid var(--accent)' }}>
+          <div className="card-header flex justify-between items-center bg-gray-50/50">
+            <div>
+              <h4 className="text-accent flex items-center gap-2" style={{ fontSize: '1.05rem', fontWeight: 600, margin: 0 }}>
+                <Cpu size={18} /> Arduino Configuration (config.h)
+              </h4>
+              <p className="text-xs text-muted mt-1 m-0">Includes your unique FLAPMAIN_DEVICE_KEY.</p>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={copyConfig} className="btn btn-secondary btn-sm" style={{ transition: 'all 0.2s' }}>
+                {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
+                <span className={copied ? "text-success" : ""}>{copied ? 'Copied!' : 'Copy Code'}</span>
+              </button>
+              <button onClick={handleDownloadConfig} className="btn btn-primary btn-sm">
+                <Download size={14} />
+                <span>Save to Local System</span>
+              </button>
+            </div>
           </div>
-          <pre style={{ background: '#f8fafc', color: '#0f172a', padding: '12px', borderRadius: '4px', fontSize: '0.85rem', fontFamily: 'var(--font-mono)', border: '1px solid #cbd5e1' }}>
-            {configSnippet}
-          </pre>
+          <div className="card-body bg-slate-900 p-0">
+            <div className="premium-code-block" style={{ border: 'none', borderRadius: 0, boxShadow: 'none' }}>
+              <pre style={{ margin: 0, padding: 0, overflowX: 'auto', background: 'transparent', border: 'none', color: 'inherit' }}>
+                {configSnippet}
+              </pre>
+            </div>
+          </div>
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '30px' }}>
+      <div className="grid" style={{ gridTemplateColumns: '2fr 1fr', gap: 'var(--space-6)' }}>
         {/* Left Column: Line Charts & History Log */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
+        <div className="flex flex-col gap-6">
           {/* Dynamic Charts Display */}
           {numericFields.map(([fieldName, fieldDef]) => (
-            <div key={fieldName} className="glass-panel" style={{ padding: '24px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                <h3 style={{ fontSize: '1.15rem' }}>
+            <div key={fieldName} className="card card-body">
+              <div className="flex justify-between items-center mb-4">
+                <h3 style={{ fontSize: '1rem', fontWeight: 600 }}>
                   {fieldName} ({fieldDef.unit || 'unit'}) — Sensor Ingestion Window
                 </h3>
-                <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                <span className="text-xs text-muted">
                   Showing latest {readings.length} payloads
                 </span>
               </div>
 
               <div style={{ width: '100%', height: '220px' }}>
                 {chartData.length === 0 ? (
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)' }}>
+                  <div className="flex items-center justify-center h-full text-muted text-sm">
                     No telemetry records. Send readings from ESP8266 to plot graph.
                   </div>
                 ) : (
                   <ReResponsiveContainer width="100%" height="100%">
                     <ReLineChart data={chartData}>
-                      <ReCartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <ReXAxis dataKey="timestamp" stroke="var(--text-muted)" fontSize={11} />
-                      <ReYAxis stroke="var(--text-muted)" fontSize={11} />
+                      <ReCartesianGrid strokeDasharray="3 3" stroke="var(--subtle)" />
+                      <ReXAxis dataKey="timestamp" stroke="var(--text-muted)" fontSize={10} tickLine={false} axisLine={false} />
+                      <ReYAxis stroke="var(--text-muted)" fontSize={10} tickLine={false} axisLine={false} />
                       <ReTooltip
-                        contentStyle={{ background: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', color: '#0f172a', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}
-                        labelStyle={{ color: '#0f172a', fontWeight: '600' }}
+                        contentStyle={{ background: '#ffffff', borderColor: 'var(--subtle)', borderRadius: '6px', color: 'var(--text-main)', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        labelStyle={{ color: 'var(--text-main)', fontWeight: '500', fontSize: '0.85rem' }}
+                        itemStyle={{ fontSize: '0.85rem' }}
                       />
-                      <ReLine type="monotone" dataKey={fieldName} stroke="#1f74b5" strokeWidth={2.5} dot={{ r: 4 }} />
+                      <ReLine type="monotone" dataKey={fieldName} stroke="var(--primary)" strokeWidth={2} dot={{ r: 3, fill: 'var(--primary)' }} activeDot={{ r: 5 }} />
                     </ReLineChart>
                   </ReResponsiveContainer>
                 )}
@@ -236,19 +273,19 @@ function DeviceDetail() {
           ))}
 
           {/* Readings Logs Table */}
-          <div className="glass-panel" style={{ padding: '24px', overflowX: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <div className="card" style={{ overflowX: 'auto' }}>
+            <div className="card-header flex justify-between items-center flex-wrap gap-4">
               <div>
-                <h3 style={{ fontSize: '1.15rem' }}>Latest Payload Logs</h3>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Storage window per sensor payload feed</p>
+                <h3 style={{ fontSize: '1rem', fontWeight: 600 }}>Latest Payload Logs</h3>
+                <p className="text-xs text-muted mt-1">Storage window per sensor payload feed</p>
               </div>
 
-              <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }}>
-                  <span>Payload Window:</span>
+              <div className="flex gap-3 items-center">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-muted">Window:</span>
                   <select
-                    className="form-input"
-                    style={{ padding: '4px 8px', height: '32px', fontSize: '0.85rem' }}
+                    className="form-input form-select text-xs py-1"
+                    style={{ width: 'auto' }}
                     value={limit}
                     onChange={(e) => setLimit(Number(e.target.value))}
                   >
@@ -259,32 +296,34 @@ function DeviceDetail() {
                   </select>
                 </div>
 
-                <a href={exportUrl('json')} target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem' }}>
-                  <Download size={14} /> JSON
-                </a>
-                <a href={exportUrl('csv')} target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem' }}>
-                  <Download size={14} /> CSV
-                </a>
+                <div className="flex gap-2">
+                  <a href={exportUrl('json')} target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm">
+                    <Download size={14} /> JSON
+                  </a>
+                  <a href={exportUrl('csv')} target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm">
+                    <Download size={14} /> CSV
+                  </a>
+                </div>
               </div>
             </div>
 
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+            <table className="table" style={{ width: '100%', minWidth: '400px' }}>
               <thead>
-                <tr style={{ borderBottom: '1px solid var(--card-border)', textAlign: 'left' }}>
-                  <th style={{ padding: '12px', color: 'var(--text-secondary)' }}>Timestamp</th>
+                <tr>
+                  <th>Timestamp</th>
                   {schemaFields.map(([name]) => (
-                    <th key={name} style={{ padding: '12px', color: 'var(--text-secondary)' }}>{name}</th>
+                    <th key={name}>{name}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {readings.map((r, i) => (
-                  <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                    <td style={{ padding: '10px 12px', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                  <tr key={i}>
+                    <td className="text-mono text-muted text-xs">
                       {new Date(r.timestamp).toLocaleString()}
                     </td>
                     {schemaFields.map(([name]) => (
-                      <td key={name} style={{ padding: '10px 12px' }}>
+                      <td key={name}>
                         {String(r.payload[name] !== undefined ? r.payload[name] : '-')}
                       </td>
                     ))}
@@ -296,74 +335,86 @@ function DeviceDetail() {
         </div>
 
         {/* Right Column: Device Status, Actuator triggers, Rules summary */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
+        <div className="flex flex-col gap-6">
           {/* Metadata Stats */}
-          <div className="glass-panel" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <h3 style={{ fontSize: '1.15rem' }}>Device Information</h3>
-            <div style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div>
-                <span style={{ color: 'var(--text-secondary)', display: 'block' }}>Friendly Name</span>
-                <strong>{device?.name}</strong>
+          <div className="card">
+            <div className="card-header">
+              <h3 style={{ fontSize: '1rem', fontWeight: 600 }}>Device Information</h3>
+            </div>
+            <div className="card-body flex flex-col gap-4 text-sm">
+              <div className="flex flex-col gap-1">
+                <span className="text-dim">Friendly Name</span>
+                <strong className="text-main">{device?.name}</strong>
               </div>
-              <div>
-                <span style={{ color: 'var(--text-secondary)', display: 'block' }}>Connection Status</span>
-                <span className={`status-badge ${device?.status}`} style={{ marginTop: '4px' }}>
-                  {device?.status.toUpperCase()}
-                </span>
+              <div className="flex flex-col gap-1">
+                <span className="text-dim">Connection Status</span>
+                <div>
+                  <span className={`status-badge ${device?.status}`}>
+                    {device?.status.toUpperCase()}
+                  </span>
+                </div>
               </div>
-              <div>
-                <span style={{ color: 'var(--text-secondary)', display: 'block' }}>Location</span>
-                <strong>{device?.location || 'Not Configured'}</strong>
+              <div className="flex flex-col gap-1">
+                <span className="text-dim">Location</span>
+                <strong className="text-main">{device?.location || 'Not Configured'}</strong>
               </div>
-              <div>
-                <span style={{ color: 'var(--text-secondary)', display: 'block' }}>Last Seen Telemetry</span>
-                <strong>{device?.last_seen ? new Date(device.last_seen).toLocaleString() : 'Never'}</strong>
+              <div className="flex flex-col gap-1">
+                <span className="text-dim">Last Seen Telemetry</span>
+                <strong className="text-main text-xs">
+                  {readings.length > 0 && readings[0].timestamp
+                    ? new Date(readings[0].timestamp).toLocaleString()
+                    : device?.last_seen
+                    ? new Date(device.last_seen).toLocaleString()
+                    : 'Never'}
+                </strong>
               </div>
             </div>
           </div>
 
           {/* Actuator commands */}
           {deviceType && deviceType.commands.length > 0 && (
-            <div className="glass-panel" style={{ padding: '24px' }}>
-              <h3 style={{ fontSize: '1.15rem', marginBottom: '16px' }}>Transmit Actuator Command</h3>
-              {commandResponse && (
-                <div style={{ padding: '10px', borderRadius: '4px', background: '#f8fafc', fontSize: '0.85rem', marginBottom: '16px', border: '1px solid #cbd5e1' }}>
-                  {commandResponse}
-                </div>
-              )}
-              <form onSubmit={handleSendCommand} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div className="form-group">
-                  <label className="form-label">Command Name</label>
-                  <select
-                    className="form-input"
-                    style={{ background: '#ffffff' }}
-                    value={commandForm.command}
-                    onChange={(e) => setCommandForm({ ...commandForm, command: e.target.value })}
-                  >
-                    {deviceType.commands.map((cmd) => (
-                      <option key={cmd} value={cmd}>
-                        {cmd}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+            <div className="card">
+              <div className="card-header">
+                <h3 style={{ fontSize: '1rem', fontWeight: 600 }}>Transmit Actuator Command</h3>
+              </div>
+              <div className="card-body">
+                {commandResponse && (
+                  <div className="text-sm p-3 mb-4 rounded text-mono" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', wordBreak: 'break-all' }}>
+                    {commandResponse}
+                  </div>
+                )}
+                <form onSubmit={handleSendCommand} className="flex flex-col gap-4">
+                  <div className="form-group mb-0">
+                    <label className="form-label">Command Name</label>
+                    <select
+                      className="form-input form-select"
+                      value={commandForm.command}
+                      onChange={(e) => setCommandForm({ ...commandForm, command: e.target.value })}
+                    >
+                      {deviceType.commands.map((cmd) => (
+                        <option key={cmd} value={cmd}>
+                          {cmd}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                <div className="form-group">
-                  <label className="form-label">Payload Parameters (JSON)</label>
-                  <textarea
-                    className="form-input"
-                    rows={4}
-                    style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem' }}
-                    value={commandForm.payload}
-                    onChange={(e) => setCommandForm({ ...commandForm, payload: e.target.value })}
-                  />
-                </div>
+                  <div className="form-group mb-0">
+                    <label className="form-label">Payload Parameters (JSON)</label>
+                    <textarea
+                      className="form-input text-mono text-xs"
+                      rows={4}
+                      value={commandForm.payload}
+                      onChange={(e) => setCommandForm({ ...commandForm, payload: e.target.value })}
+                    />
+                  </div>
 
-                <button type="submit" className="btn btn-primary" style={{ width: '100%' }}>
-                  <Send size={14} />
-                  <span>Transmit Command</span>
-                </button>
-              </form>
+                  <button type="submit" className="btn btn-primary w-full" style={{ padding: '0.625rem 1rem' }}>
+                    <Send size={14} />
+                    <span>Transmit Command</span>
+                  </button>
+                </form>
+              </div>
             </div>
           )}
         </div>

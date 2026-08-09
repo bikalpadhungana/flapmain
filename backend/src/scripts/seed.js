@@ -4,6 +4,8 @@ const connectDB = require('../config/db');
 const Org = require('../models/Org');
 const User = require('../models/User');
 const DeviceType = require('../models/DeviceType');
+const Device = require('../models/Device');
+const crypto = require('crypto');
 
 const seed = async () => {
   try {
@@ -13,6 +15,7 @@ const seed = async () => {
     await Org.deleteMany({});
     await User.deleteMany({});
     await DeviceType.deleteMany({});
+    await Device.deleteMany({});
 
     console.log('Creating default organization (Flap)...');
     const defaultOrg = await Org.create({
@@ -39,6 +42,24 @@ const seed = async () => {
         fields: {
           weight_kg: { type: 'number', unit: 'kg' },
           height_cm: { type: 'number', unit: 'cm' },
+        },
+        commands: [],
+      },
+      {
+        device_type: 'height_sensor_v1',
+        display_name: 'Ultrasonic Height Sensor',
+        fields: {
+          height_cm: { type: 'number', unit: 'cm' },
+        },
+        commands: [],
+      },
+      {
+        device_type: 'nfc_reader',
+        display_name: 'NFC Card Reader Terminal',
+        fields: {
+          tag_uid: { type: 'string', unit: 'uid' },
+          tag_type: { type: 'string', unit: 'type' },
+          type: { type: 'string', unit: 'action' },
         },
         commands: [],
       },
@@ -74,6 +95,34 @@ const seed = async () => {
       await DeviceType.create(dt);
       console.log(`Seeded device type: ${dt.device_type}`);
     }
+
+    console.log('Seeding demo devices...');
+    const api_key_hash = crypto.createHash('sha256').update('flap-key-001').digest('hex');
+    const scale_api_key_hash = crypto.createHash('sha256').update('scale-key-001').digest('hex');
+
+    await Device.create({
+      device_id: 'ccc853990e8670ac94ecc4fcfdcb1988',
+      org_id: defaultOrg._id,
+      device_type: 'nfc_reader',
+      name: 'Main Door NFC Reader',
+      location: 'Front Gate',
+      api_key_hash,
+      status: 'offline',
+      activation_status: 'active',
+    });
+
+    await Device.create({
+      device_id: 'scale_hw_001',
+      org_id: defaultOrg._id,
+      device_type: 'weight_scale_v1',
+      name: 'Medical Height & Weight Scale',
+      location: 'Clinic Room 101',
+      api_key_hash: scale_api_key_hash,
+      status: 'online',
+      activation_status: 'active',
+    });
+    console.log('Demo NFC reader and Height & Weight scale device seeded successfully.');
+
 
     console.log('Database seeding completed successfully!');
     process.exit(0);

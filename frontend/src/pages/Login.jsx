@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { API_BASE_URL } from '../config';
 
 function Login() {
-  const [email, setEmail] = useState('admin@flap.com');
-  const [password, setPassword] = useState('adminpassword123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
@@ -38,29 +38,26 @@ function Login() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
-      <div className="glow-spot" style={{ top: '20%', left: '20%' }}></div>
-      <div className="glow-spot" style={{ bottom: '20%', right: '20%' }}></div>
-
-      <div className="glass-panel" style={{ width: '420px', padding: '40px', textAlign: 'center', zIndex: 1 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', marginBottom: '32px' }}>
+    <div className="flex items-center justify-center relative" style={{ minHeight: '100vh', background: 'var(--bg-app)' }}>
+      <div className="card shadow-md" style={{ width: '420px', padding: 'var(--space-8)', textAlign: 'center', zIndex: 1, margin: '16px' }}>
+        <div className="flex flex-col items-center gap-3 mb-8">
           <img src="/flapmainlogo.png" alt="FlapMain Logo" style={{ height: '70px', width: 'auto', objectFit: 'contain' }} />
-          <div>
-            <h1 style={{ fontSize: '2rem', fontWeight: '700', margin: 0, background: 'linear-gradient(to right, #1f74b5, #3892d6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+          <div style={{ textAlign: 'center', width: '100%' }}>
+            <h1 className="m-0 text-main" style={{ fontSize: '2rem', fontWeight: 700, letterSpacing: '-0.02em', textAlign: 'center' }}>
               FlapMain
             </h1>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '4px' }}>IoT Management Dashboard</p>
+            <p className="text-muted text-sm mt-1 m-0" style={{ textAlign: 'center' }}>IoT Management Dashboard</p>
           </div>
         </div>
 
         {error && (
-          <div style={{ background: 'var(--danger-glow)', border: '1px solid rgba(239, 68, 68, 0.3)', color: 'var(--danger)', padding: '12px', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem', marginBottom: '20px', textAlign: 'left' }}>
+          <div className="text-left text-sm text-error bg-red-50 border border-red-200 p-3 rounded mb-5" style={{ background: 'var(--status-error-bg)', color: 'var(--status-error)', borderColor: '#fecaca' }}>
             {error}
           </div>
         )}
 
-        <form onSubmit={handleLogin}>
-          <div className="form-group">
+        <form onSubmit={handleLogin} className="flex flex-col gap-5" style={{ textAlign: 'left' }}>
+          <div className="form-group mb-0">
             <label className="form-label">Email Address</label>
             <input
               type="email"
@@ -71,7 +68,7 @@ function Login() {
             />
           </div>
 
-          <div className="form-group">
+          <div className="form-group mb-0">
             <label className="form-label">Password</label>
             <input
               type="password"
@@ -84,8 +81,8 @@ function Login() {
 
           <button
             type="submit"
-            className="btn btn-primary"
-            style={{ width: '100%', padding: '12px', marginTop: '10px' }}
+            className="btn btn-primary w-full mt-2"
+            style={{ padding: '0.75rem 1rem' }}
             disabled={loading}
           >
             {loading ? 'Authenticating...' : 'Sign In'}

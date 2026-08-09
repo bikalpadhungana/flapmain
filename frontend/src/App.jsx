@@ -4,9 +4,13 @@ import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import DeviceDetail from './pages/DeviceDetail';
-import SchemaRegistry from './pages/SchemaRegistry';
+import SystemLogs from './pages/SystemLogs';
+import Devices from './pages/Devices';
 import ApiKeys from './pages/ApiKeys';
 import AlertRules from './pages/AlertRules';
+import SystemMonitor from './pages/SystemMonitor';
+import ScaleMonitor from './pages/ScaleMonitor';
+import SensorFusion from './pages/SensorFusion';
 import './App.css';
 
 // Guard wrapper
@@ -21,9 +25,9 @@ const ProtectedRoute = ({ children }) => {
 // Main Layout Wrapper
 const DashboardLayout = ({ children }) => {
   return (
-    <div style={{ display: 'flex', gap: '30px', padding: '24px', minHeight: '100vh', background: 'var(--bg-primary)' }}>
+    <div className="app-layout">
       <Sidebar />
-      <main style={{ flex: 1, minWidth: 0 }}>
+      <main className="main-content">
         {children}
       </main>
     </div>
@@ -35,7 +39,7 @@ function App() {
     <Router>
       <Routes>
         <Route path="/login" element={<Login />} />
-        
+
         {/* Protected Dashboard Routes */}
         <Route
           path="/"
@@ -58,11 +62,22 @@ function App() {
           }
         />
         <Route
-          path="/registry"
+          path="/logs"
           element={
             <ProtectedRoute>
               <DashboardLayout>
-                <SchemaRegistry />
+                <SystemLogs />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/devices"
+
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <Devices />
               </DashboardLayout>
             </ProtectedRoute>
           }
@@ -83,6 +98,36 @@ function App() {
             <ProtectedRoute>
               <DashboardLayout>
                 <AlertRules />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/system-monitor"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <SystemMonitor />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/scale-monitor"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <ScaleMonitor />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/fusion"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <SensorFusion />
               </DashboardLayout>
             </ProtectedRoute>
           }

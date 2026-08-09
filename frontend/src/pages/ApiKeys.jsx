@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Key, Calendar, Shield, Trash2, Check } from 'lucide-react';
+import { Plus, Key, Calendar, Shield, Trash2, Check, Copy, AlertTriangle } from 'lucide-react';
 import { API_BASE_URL } from '../config';
-
+import Modal from '../components/Modal';
+import ConfirmModal from '../components/ConfirmModal';
 function ApiKeys() {
   const navigate = useNavigate();
   const token = localStorage.getItem('token');
@@ -11,6 +12,7 @@ function ApiKeys() {
   const [loading, setLoading] = useState(true);
 
   // Form states
+  const [isModalOpen, setIsModalOpen] = useState(false);
   const [label, setLabel] = useState('');
   const [scopes, setScopes] = useState({
     'read:devices': true,
@@ -19,7 +21,11 @@ function ApiKeys() {
   });
   const [rateLimit, setRateLimit] = useState(60);
   const [newKeyGenerated, setNewKeyGenerated] = useState('');
+  const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
+  
+  // Confirmation Modal State
+  const [confirmModal, setConfirmModal] = useState({ isOpen: false, id: null });
 
   useEffect(() => {
     if (!token) {
@@ -47,6 +53,7 @@ function ApiKeys() {
     e.preventDefault();
     setError('');
     setNewKeyGenerated('');
+    setCopied(false);
 
     // Filter active scopes
     const activeScopes = Object.entries(scopes)
@@ -80,13 +87,32 @@ function ApiKeys() {
       setNewKeyGenerated(data.apiKey);
       setLabel('');
       fetchKeys();
+      // Keep modal open to show the key
     } catch (err) {
       setError(err.message);
     }
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm('Are you sure you want to revoke this API Key? Devices/partners using it will immediately be rejected.')) return;
+  const copyToClipboard = () => {
+    navigator.clipboard.writeText(newKeyGenerated);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  };
+
+  const closeAndResetModal = () => {
+    setIsModalOpen(false);
+    setNewKeyGenerated('');
+    setError('');
+    setLabel('');
+  };
+
+  const handleDeleteClick = (id) => {
+    setConfirmModal({ isOpen: true, id });
+  };
+
+  const handleDeleteConfirm = async () => {
+    const id = confirmModal.id;
+    if (!id) return;
 
     try {
       const response = await fetch(`${API_BASE_URL}/v1/api-keys/${id}`, {
@@ -103,127 +129,151 @@ function ApiKeys() {
   };
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '30px', textAlign: 'left' }}>
-      <header>
-        <h1 style={{ fontSize: '2rem', fontWeight: '700' }}>Partner API Keys</h1>
-        <p style={{ color: 'var(--text-secondary)' }}>Manage scoped authorization credentials for third-party system integrations.</p>
+    <div className="flex flex-col gap-6 flex-1 h-full relative animate-slide-up">
+      <header className="flex justify-between items-center">
+        <div>
+          <h1 className="text-main" style={{ fontSize: '1.75rem', fontWeight: 600, letterSpacing: '-0.02em' }}>Partner API Keys</h1>
+          <p className="text-muted text-sm mt-1">Manage scoped authorization credentials for third-party system integrations.</p>
+        </div>
+        <button onClick={() => setIsModalOpen(true)} className="btn btn-primary" style={{ boxShadow: '0 4px 12px rgba(99, 91, 255, 0.3)' }}>
+          <Plus size={16} /> Generate New Key
+        </button>
       </header>
 
-      {/* Banner: New Key */}
-      {newKeyGenerated && (
-        <div className="glass-panel" style={{ padding: '24px', borderLeft: '4px solid var(--success)', background: 'rgba(16, 185, 129, 0.05)' }}>
-          <h4 style={{ color: 'var(--success)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Check size={18} /> API Key Generated Successfully!
-          </h4>
-          <p style={{ fontSize: '0.9rem', marginBottom: '12px' }}>
-            Store this key securely. It represents access to your workspace scoped data and **will not** be displayed again:
-          </p>
-          <code style={{ background: '#f8fafc', color: '#0f172a', padding: '12px 16px', borderRadius: '4px', display: 'block', fontSize: '0.95rem', overflowX: 'auto', border: '1px solid #cbd5e1' }}>
-            {newKeyGenerated}
-          </code>
-        </div>
-      )}
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '30px', alignItems: 'start' }}>
-        {/* Keys listing */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <h3 style={{ fontSize: '1.25rem' }}>Active Keys ({keys.length})</h3>
-          {loading ? (
-            <div style={{ color: 'var(--text-muted)' }}>Loading keys...</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              {keys.map((k) => (
-                <div key={k._id} className="glass-panel" style={{ padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                  <div style={{ display: 'flex', gap: '12px', alignItems: 'start' }}>
-                    <div style={{ background: 'var(--accent-glow)', borderRadius: '8px', padding: '8px' }}>
-                      <Key size={18} color="var(--accent-light)" />
+      <div className="flex flex-col gap-4">
+        {loading ? (
+          <div className="text-muted text-sm">Loading keys...</div>
+        ) : keys.length === 0 ? (
+          <div className="card card-body text-center text-muted py-10" style={{ borderStyle: 'dashed' }}>
+            No API Keys generated yet. Create one to allow external systems to securely connect.
+          </div>
+        ) : (
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: 'var(--space-4)' }}>
+            {keys.map((k) => (
+              <div key={k._id} className="premium-card card-body flex flex-col justify-between gap-4">
+                <div className="flex justify-between items-start">
+                  <div className="flex gap-3 items-start">
+                    <div className="p-2.5 rounded-lg" style={{ background: 'linear-gradient(135deg, var(--accent-light) 0%, #e0e7ff 100%)', color: 'var(--action-primary)' }}>
+                      <Key size={20} />
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <h4 style={{ fontSize: '1.05rem', fontWeight: '600' }}>{k.label}</h4>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                        {k.scopes.map((s) => (
-                          <span key={s} style={{ background: '#f1f5f9', border: '1px solid #e2e8f0', padding: '1px 6px', borderRadius: '4px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                            {s}
-                          </span>
-                        ))}
-                      </div>
-                      <div style={{ display: 'flex', gap: '16px', fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <Calendar size={12} /> Registered: {new Date(k.createdAt).toLocaleDateString()}
-                        </span>
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <Shield size={12} /> Rate limit: {k.rate_limit_rpm} RPM
-                        </span>
+                    <div className="flex flex-col gap-1">
+                      <h4 className="font-semibold text-main m-0" style={{ fontSize: '1.1rem' }}>{k.label}</h4>
+                      <div className="flex items-center gap-1.5 text-xs text-muted">
+                        <Calendar size={12} /> {new Date(k.createdAt).toLocaleDateString()}
+                        <span className="mx-1">•</span>
+                        <Shield size={12} /> {k.rate_limit_rpm} RPM
                       </div>
                     </div>
                   </div>
-
                   <button
-                    onClick={() => handleDelete(k._id)}
-                    className="btn btn-secondary"
-                    style={{ padding: '6px', borderRadius: '4px', color: 'var(--danger)', borderColor: 'transparent' }}
+                    onClick={() => handleDeleteClick(k._id)}
+                    className="btn btn-icon text-muted hover:text-error hover:bg-red-50"
+                    style={{ background: 'transparent' }}
                   >
-                    <Trash2 size={16} />
+                    <Trash2 size={18} />
                   </button>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+                
+                <div className="pt-3 border-t border-subtle">
+                  <span className="text-xs text-dim font-medium uppercase tracking-wider mb-2 block">Scopes</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {k.scopes.map((s) => (
+                      <span key={s} className="badge badge-neutral" style={{ padding: '3px 8px', fontSize: '0.75rem' }}>
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
-        {/* Key generator form */}
-        <div className="glass-panel" style={{ padding: '24px' }}>
-          <h3 style={{ fontSize: '1.25rem', marginBottom: '16px' }}>Generate Scoped Key</h3>
-          {error && <p style={{ color: 'var(--danger)', fontSize: '0.85rem', marginBottom: '12px' }}>{error}</p>}
-          
-          <form onSubmit={handleCreateKey} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            <div className="form-group">
-              <label className="form-label">Key Label / Partner Identifier</label>
+      <Modal
+        open={isModalOpen}
+        onClose={closeAndResetModal}
+        title={newKeyGenerated ? "Key Generated Successfully" : "Generate Scoped Key"}
+        maxWidth="500px"
+      >
+        {error && <div className="text-error text-sm mb-4 p-3 rounded" style={{ background: 'var(--status-error-bg)' }}>{error}</div>}
+        
+        {newKeyGenerated ? (
+          <div className="flex flex-col gap-4 animate-slide-up">
+            <div className="flex items-start gap-3 p-4 rounded-lg" style={{ background: 'var(--status-warn-bg)', border: '1px solid #fde68a' }}>
+              <AlertTriangle size={20} className="text-amber-600 shrink-0 mt-0.5" />
+              <p className="text-amber-900 text-sm m-0">
+                <strong>Copy this key now.</strong> For your security, it will never be displayed again. If you lose it, you will need to revoke it and generate a new one.
+              </p>
+            </div>
+            
+            <div className="premium-code-block glow-border flex justify-between items-center group">
+              <code className="text-sm tracking-wider" style={{ wordBreak: 'break-all' }}>{newKeyGenerated}</code>
+              <button 
+                onClick={copyToClipboard} 
+                className="btn btn-primary btn-sm shrink-0 ml-4 transition-all"
+                style={{ opacity: copied ? 1 : 0.9 }}
+              >
+                {copied ? <Check size={16} /> : <Copy size={16} />}
+                <span>{copied ? 'Copied!' : 'Copy Key'}</span>
+              </button>
+            </div>
+            
+            <button onClick={closeAndResetModal} className="btn btn-secondary w-full mt-2">
+              Done
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={handleCreateKey} className="flex flex-col gap-5">
+            <div className="form-group mb-0">
+              <label className="form-label">Key Label / Partner Identifier *</label>
               <input
                 type="text"
                 className="form-input"
-                placeholder="e.g. NirmanLink Telemetry Client"
+                placeholder="e.g. ERP System Telemetry Access"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 required
               />
             </div>
 
-            <div className="form-group">
+            <div className="form-group mb-0">
               <label className="form-label">Permission Scopes</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '6px' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', fontSize: '0.9rem' }}>
+              <div className="flex flex-col gap-3 mt-2 p-4 rounded-lg border border-subtle bg-gray-50">
+                <label className="flex items-center gap-3 cursor-pointer text-sm text-main">
                   <input
                     type="checkbox"
                     checked={scopes['read:devices']}
                     onChange={(e) => setScopes({ ...scopes, 'read:devices': e.target.checked })}
-                    style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }}
+                    style={{ width: '18px', height: '18px', accentColor: 'var(--action-primary)' }}
                   />
-                  <span>read:devices (List & fetch device registries)</span>
+                  <span><strong className="font-medium">read:devices</strong> <span className="text-muted block text-xs mt-0.5">List and fetch device registries</span></span>
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', fontSize: '0.9rem' }}>
+                <div className="h-px bg-gray-200 w-full"></div>
+                <label className="flex items-center gap-3 cursor-pointer text-sm text-main">
                   <input
                     type="checkbox"
                     checked={scopes['read:readings']}
                     onChange={(e) => setScopes({ ...scopes, 'read:readings': e.target.checked })}
-                    style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }}
+                    style={{ width: '18px', height: '18px', accentColor: 'var(--action-primary)' }}
                   />
-                  <span>read:readings (Fetch telemetry logs ranges)</span>
+                  <span><strong className="font-medium">read:readings</strong> <span className="text-muted block text-xs mt-0.5">Fetch historical telemetry logs</span></span>
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', fontSize: '0.9rem' }}>
+                <div className="h-px bg-gray-200 w-full"></div>
+                <label className="flex items-center gap-3 cursor-pointer text-sm text-main">
                   <input
                     type="checkbox"
                     checked={scopes['write:commands']}
                     onChange={(e) => setScopes({ ...scopes, 'write:commands': e.target.checked })}
-                    style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }}
+                    style={{ width: '18px', height: '18px', accentColor: 'var(--action-primary)' }}
                   />
-                  <span>write:commands (Trigger actuator commands)</span>
+                  <span><strong className="font-medium">write:commands</strong> <span className="text-muted block text-xs mt-0.5">Trigger actuator commands via API</span></span>
                 </label>
               </div>
             </div>
 
-            <div className="form-group">
-              <label className="form-label">Rate Limit (Request per Minute)</label>
+            <div className="form-group mb-0">
+              <label className="form-label">Rate Limit (Requests per Minute)</label>
               <input
                 type="number"
                 className="form-input"
@@ -234,13 +284,28 @@ function ApiKeys() {
               />
             </div>
 
-            <button type="submit" className="btn btn-primary" style={{ width: '100%' }}>
-              <Plus size={14} />
-              <span>Generate Key</span>
-            </button>
+            <div className="flex gap-3 justify-end mt-2 pt-4 border-t border-subtle">
+              <button type="button" onClick={closeAndResetModal} className="btn btn-secondary">
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" style={{ padding: '0.5rem 1.25rem' }}>
+                <Plus size={16} />
+                <span>Generate Secure Key</span>
+              </button>
+            </div>
           </form>
-        </div>
-      </div>
+        )}
+      </Modal>
+
+      <ConfirmModal
+        isOpen={confirmModal.isOpen}
+        onClose={() => setConfirmModal({ isOpen: false, id: null })}
+        onConfirm={handleDeleteConfirm}
+        title="Revoke API Key"
+        message={<><strong>Are you sure you want to revoke this API Key?</strong><br/><br/>Devices and partners using it will immediately be rejected. This action cannot be undone.</>}
+        confirmText="Revoke Key"
+        type="danger"
+      />
     </div>
   );
 }
