@@ -27,9 +27,15 @@ This document outlines the Phase 4 architectural upgrade implemented in the Flap
 4. Use the physical NFC hardware to tap a card (or trigger an HTTP POST manually).
 5. The payload will flash onto the screen instantly without needing a page refresh or waiting for a polling tick.
 
-## Future Considerations
+## WebSocket Events Reference
 
-As the IoT system scales to include actuators (e.g., toggling a switch, triggering an alarm), you can use this exact same socket connection to emit commands from the dashboard back to the backend. The backend can then forward those commands to the hardware via MQTT.
+| Event Name | Emitted By | Listened By | Payload Description |
+| :--- | :--- | :--- | :--- |
+| `new_tap` | `devices.js`, `broker.js` | `SystemMonitor.jsx`, `Dashboard.jsx` | Broadcasts new NFC card tap events globally |
+| `new_scale_reading` | `devices.js` | `ScaleMonitor.jsx`, `SensorFusion.jsx` | Broadcasts live height & weight scale telemetry |
+| `device_trigger_initiated` | `devices.js` | `ScaleMonitor.jsx`, Hardware Scale | Signals device readiness for measurement session |
+| `scale_measurement_completed` | `devices.js` | `ScaleMonitor.jsx`, External APIs | Emits completed scale reading with external webhook delivery status |
+| `sensor_fusion_tap` | `devices.js` | `SensorFusion.jsx` | Workstation session event pairing Card Reader to Scale |
 
 ---
 

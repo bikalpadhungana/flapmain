@@ -238,8 +238,17 @@ void setup() {
   // Web server
   server.on("/", handleRoot);
   server.on("/data", handleData);
+  server.on("/trigger", handleTriggerLocal);
   server.begin();
   Serial.println("Local web server started");
+}
+
+void handleTriggerLocal() {
+  server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Scale measurement initiated. Device ready for reading.\"}");
+  digitalWrite(LED_PIN, LOW); // Blink onboard LED to indicate readiness
+  delay(150);
+  digitalWrite(LED_PIN, HIGH);
+  Serial.println("[HARDWARE] Measurement initiated via trigger API");
 }
 
 // ===================== LOOP =====================

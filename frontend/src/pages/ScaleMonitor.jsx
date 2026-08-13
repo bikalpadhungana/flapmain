@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Activity, Radio, RefreshCw, Ruler, Weight, Wifi, WifiOff, Clock, Zap } from 'lucide-react';
+import { Activity, Radio, RefreshCw, Ruler, Weight, Wifi, WifiOff, Clock, Zap, Send, CheckCircle, ExternalLink, Play, AlertCircle } from 'lucide-react';
 import { API_BASE_URL } from '../config';
 import { io } from 'socket.io-client';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
@@ -12,6 +12,12 @@ const ScaleMonitor = () => {
   const [heightData, setHeightData] = useState({ value: null, deviceId: null, lastSeen: null, online: false });
   const [weightData, setWeightData] = useState({ value: null, deviceId: null, lastSeen: null, online: false });
 
+  // Initiate Measurement & Integration trigger state
+  const [triggerDevice, setTriggerDevice] = useState('');
+  const [externalUserId, setExternalUserId] = useState('');
+  const [callbackUrl, setCallbackUrl] = useState('');
+  const [triggerState, setTriggerState] = useState({ status: 'idle', session: null, message: '' });
+
   const heightTimeoutRef = useRef(null);
   const weightTimeoutRef = useRef(null);
   const DEVICE_TIMEOUT_MS = 15000;
@@ -23,6 +29,24 @@ const ScaleMonitor = () => {
 
       socket.on('connect', () => {
         console.log('[ScaleMonitor] Connected to real-time telemetry stream');
+      });
+
+      socket.on('device_trigger_initiated', (data) => {
+        console.log('[ScaleMonitor] Device trigger initiated:', data);
+        setTriggerState({
+          status: 'ready',
+          session: data,
+          message: `Device '${data.device_id}' ready for user ${data.external_user_id}. Step on scale!`
+        });
+      });
+
+      socket.on('scale_measurement_completed', (data) => {
+        console.log('[ScaleMonitor] Measurement completed:', data);
+        setTriggerState(prev => ({
+          status: 'completed',
+          session: prev.session,
+          message: `Measurement completed! Weight: ${data.reading?.weight_kg || '--'} kg, Height: ${data.reading?.height_cm || '--'} cm${data.external_forwarded ? ' (Forwarded to Webhook API)' : ''}`
+        }));
       });
 
       socket.on('new_scale_reading', (reading) => {
@@ -74,6 +98,48 @@ const ScaleMonitor = () => {
       if (weightTimeoutRef.current) clearTimeout(weightTimeoutRef.current);
     };
   }, [isPolling]);
+
+  const handleInitiateReading = async () => {
+    const targetId = triggerDevice || weightData.deviceId || heightData.deviceId || 'scale_hw_001';
+    setTriggerState({ status: 'initiating', session: null, message: 'Initiating device measurement...' });
+
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${API_BASE_URL}/v1/devices/${targetId}/trigger`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          device_id: targetId,
+          external_user_id: externalUserId || 'PATIENT-001',
+          callback_url: callbackUrl.trim() || undefined
+        })
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setTriggerState({
+          status: 'ready',
+          session: data,
+          message: `Device '${targetId}' is READY! Step on scale now.`
+        });
+      } else {
+        setTriggerState({
+          status: 'error',
+          session: null,
+          message: data.message || 'Failed to initiate device measurement.'
+        });
+      }
+    } catch (err) {
+      setTriggerState({
+        status: 'error',
+        session: null,
+        message: 'Network error connecting to scale trigger API.'
+      });
+    }
+  };
 
   const currentHeight = heightData.value || 0;
   const currentWeight = weightData.value || 0;
@@ -155,6 +221,102 @@ const ScaleMonitor = () => {
             />
           </>
         )}
+      </div>
+
+      {/* Initiate Measurement & Third-Party Integration Panel */}
+      <div className="card" style={{
+        padding: 'var(--space-5) var(--space-6)',
+        background: 'var(--bg-surface)',
+        border: '1px solid var(--border-strong)',
+        borderRadius: 16,
+        boxShadow: 'var(--shadow-sm)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 10,
+              background: '#635bff18', color: '#635bff',
+              display: 'flex', alignItems: 'center', justifyContent: 'center'
+            }}>
+              <Zap size={20} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-main)' }}>
+                Initiate Scale Measurement & Third-Party Integration API
+              </div>
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                Trigger device readiness for patient readings & automatically forward data to connected external platform APIs
+              </div>
+            </div>
+          </div>
+
+          <span style={{
+            padding: '4px 12px', borderRadius: '999px',
+            background: triggerState.status === 'ready' ? '#10b98120' : triggerState.status === 'completed' ? '#635bff20' : '#64748b15',
+            color: triggerState.status === 'ready' ? '#10b981' : triggerState.status === 'completed' ? '#635bff' : '#64748b',
+            fontSize: '0.75rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 6
+          }}>
+            {triggerState.status === 'ready' && <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#10b981', boxShadow: '0 0 8px #10b981' }} />}
+            {triggerState.status === 'ready' ? '● DEVICE READY — AWAITING STEP ON SCALE' : triggerState.status === 'completed' ? '✓ MEASUREMENT COMPLETED' : '○ STANDBY'}
+          </span>
+        </div>
+
+        {/* Input Controls */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label" style={{ display: 'block', fontSize: '0.75rem', marginBottom: 4 }}>Target Device ID</label>
+            <input
+              className="form-control"
+              placeholder={weightData.deviceId || heightData.deviceId || 'scale_hw_001'}
+              value={triggerDevice}
+              onChange={e => setTriggerDevice(e.target.value)}
+              style={{ fontSize: '0.85rem' }}
+            />
+          </div>
+
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label" style={{ display: 'block', fontSize: '0.75rem', marginBottom: 4 }}>External User / Patient Handle</label>
+            <input
+              className="form-control"
+              placeholder="e.g. PATIENT-1042 or Bikalpa"
+              value={externalUserId}
+              onChange={e => setExternalUserId(e.target.value)}
+              style={{ fontSize: '0.85rem' }}
+            />
+          </div>
+
+          <div className="form-group" style={{ marginBottom: 0, gridColumn: 'span 1' }}>
+            <label className="form-label" style={{ display: 'block', fontSize: '0.75rem', marginBottom: 4 }}>
+              External Webhook Callback API (Optional)
+            </label>
+            <input
+              className="form-control"
+              placeholder="https://external-platform.com/api/v1/scale-measurements"
+              value={callbackUrl}
+              onChange={e => setCallbackUrl(e.target.value)}
+              style={{ fontSize: '0.85rem' }}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', paddingTop: 4 }}>
+          <div style={{ fontSize: '0.78rem', color: triggerState.status === 'error' ? '#ef4444' : 'var(--text-muted)' }}>
+            {triggerState.message || 'Ready to trigger scale measurement session.'}
+          </div>
+
+          <button
+            className="btn btn-primary"
+            onClick={handleInitiateReading}
+            disabled={triggerState.status === 'initiating'}
+            style={{ padding: '8px 18px', display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: '0.85rem' }}
+          >
+            {triggerState.status === 'initiating' ? <RefreshCw size={15} className="spin" /> : <Play size={15} />}
+            {triggerState.status === 'initiating' ? 'Initiating…' : 'Initiate Scale Reading'}
+          </button>
+        </div>
       </div>
 
       {/* Main KPI Cards */}

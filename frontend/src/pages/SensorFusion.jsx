@@ -202,6 +202,11 @@ function FusionGroupPanel({ group, liveEvents }) {
                     {reading.humidity !== undefined && <div>💧 {reading.humidity}%</div>}
                     {reading.wind_speed !== undefined && <div>💨 {reading.wind_speed} m/s</div>}
                     {reading.value !== undefined && <div>📊 {reading.value}</div>}
+                    {(reading.tapped_user_name || reading.tapped_user_flapid) && (
+                      <div style={{ fontSize: '0.68rem', color: '#6366f1', fontWeight: 600, marginTop: 4 }}>
+                        👤 {reading.tapped_user_name || reading.tapped_user_flapid}
+                      </div>
+                    )}
                     <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: 2, fontWeight: 400 }}>
                       {reading.timestamp ? new Date(reading.timestamp).toLocaleTimeString() : ''}
                     </div>
@@ -263,16 +268,32 @@ function SensorFusion() {
       ? `http://${window.location.hostname}:5051`
       : window.location.origin;
     socketRef.current = io(host, { transports: ['websocket', 'polling'] });
+
     socketRef.current.on('new_tap', (data) => {
       setLiveEvents(prev => [{ ...data, type: 'tap', timestamp: data.timestamp || new Date().toISOString() }, ...prev].slice(0, 20));
     });
+
+    socketRef.current.on('sensor_fusion_tap', (data) => {
+      setLiveEvents(prev => [{ ...data, type: 'tap', timestamp: data.timestamp || new Date().toISOString() }, ...prev].slice(0, 20));
+    });
+
     socketRef.current.on('new_reading', (data) => {
       setLiveEvents(prev => [{ ...data, type: 'reading', timestamp: data.timestamp || new Date().toISOString() }, ...prev].slice(0, 20));
-      // Update live data in group panels
       setGroups(prev => prev.map(g => ({
         ...g,
         devices: (g.devices || []).map(d =>
           d.device_id === (data.device_id || data.deviceId) ? { ...d, latest_data: data } : d
+        ),
+      })));
+    });
+
+    socketRef.current.on('new_scale_reading', (data) => {
+      const readingPayload = data.payload || data;
+      setLiveEvents(prev => [{ ...readingPayload, device_id: data.device_id, type: 'reading', timestamp: data.timestamp || new Date().toISOString() }, ...prev].slice(0, 20));
+      setGroups(prev => prev.map(g => ({
+        ...g,
+        devices: (g.devices || []).map(d =>
+          d.device_id === data.device_id ? { ...d, latest_data: readingPayload } : d
         ),
       })));
     });
@@ -383,42 +404,43 @@ function SensorFusion() {
       {/* ── Modal Form ── */}
       {showForm && (
         <div style={{
-          position: 'fixed', inset: 0, background: '#00000080', zIndex: 1000,
+          position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.55)', backdropFilter: 'blur(4px)', zIndex: 1000,
           display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
         }} onClick={() => setShowForm(false)}>
           <div style={{
-            background: 'var(--surface)', borderRadius: 18, padding: 28, width: '100%', maxWidth: 560,
-            border: '1px solid var(--border)', boxShadow: '0 20px 60px #0008',
+            background: 'var(--bg-surface, #ffffff)', borderRadius: 18, padding: 28, width: '100%', maxWidth: 560,
+            border: '1px solid var(--border-strong, #cbd5e1)', boxShadow: '0 20px 60px rgba(0, 0, 0, 0.18)',
             maxHeight: '90vh', overflowY: 'auto',
           }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-              <h2 style={{ margin: 0, fontWeight: 800, fontSize: '1.1rem', color: 'var(--text-main)' }}>
+              <h2 style={{ margin: 0, fontWeight: 800, fontSize: '1.15rem', color: 'var(--text-main)' }}>
                 {editingGroup ? 'Edit Group' : 'New Fusion Group'}
               </h2>
-              <button onClick={() => setShowForm(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
-                <X size={20} />
+              <button onClick={() => setShowForm(false)} className="btn btn-secondary btn-icon" style={{ borderRadius: '50%', width: 32, height: 32, padding: 0 }}>
+                <X size={18} />
               </button>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div>
-                <label className="form-label">Group Name *</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" style={{ display: 'block', marginBottom: 6 }}>Group Name *</label>
                 <input className="form-control" placeholder="e.g. Clinic Entry Station 1"
                   value={formData.name} onChange={e => setFormData(p => ({ ...p, name: e.target.value }))} />
               </div>
-              <div>
-                <label className="form-label">Description</label>
-                <input className="form-control" placeholder="Optional description"
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" style={{ display: 'block', marginBottom: 6 }}>Description</label>
+                <input className="form-control" placeholder="Optional description (e.g. Reception Desk & Scale)"
                   value={formData.description} onChange={e => setFormData(p => ({ ...p, description: e.target.value }))} />
               </div>
 
               {/* Color picker */}
-              <div>
-                <label className="form-label">Group Color</label>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" style={{ display: 'block', marginBottom: 6 }}>Group Color</label>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                   {GROUP_COLORS.map(c => (
-                    <button key={c} onClick={() => setFormData(p => ({ ...p, color: c }))} style={{
-                      width: 28, height: 28, borderRadius: '50%', background: c, border: formData.color === c ? '3px solid var(--text-main)' : '2px solid transparent',
+                    <button key={c} type="button" onClick={() => setFormData(p => ({ ...p, color: c }))} style={{
+                      width: 30, height: 30, borderRadius: '50%', background: c, border: formData.color === c ? '3px solid #0f172a' : '2px solid transparent',
+                      boxShadow: formData.color === c ? `0 0 10px ${c}80` : 'none',
                       cursor: 'pointer', transition: 'all 0.15s',
                     }} />
                   ))}
@@ -426,9 +448,9 @@ function SensorFusion() {
               </div>
 
               {/* Device picker */}
-              <div>
-                <label className="form-label">Select Devices ({formData.device_ids.length} selected)</label>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 260, overflowY: 'auto', padding: '4px 0' }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" style={{ display: 'block', marginBottom: 6 }}>Select Devices ({formData.device_ids.length} selected)</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 260, overflowY: 'auto', padding: '4px 0' }}>
                   {allDevices.map(device => {
                     const meta = getDeviceMeta(device.device_type);
                     const Icon = meta.icon;
@@ -437,39 +459,40 @@ function SensorFusion() {
                       <div key={device.device_id}
                         onClick={() => toggleDevice(device.device_id)}
                         style={{
-                          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                          borderRadius: 10, cursor: 'pointer', transition: 'all 0.12s',
-                          background: selected ? `${meta.color}12` : 'var(--bg)',
-                          border: `1px solid ${selected ? meta.color + '60' : 'var(--border)'}`,
+                          display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px',
+                          borderRadius: 12, cursor: 'pointer', transition: 'all 0.15s ease',
+                          background: selected ? `${meta.color}15` : '#f8fafc',
+                          border: `1.5px solid ${selected ? meta.color : '#e2e8f0'}`,
                         }}>
                         <div style={{
-                          width: 20, height: 20, borderRadius: 5, border: `2px solid ${selected ? meta.color : '#64748b60'}`,
-                          background: selected ? meta.color : 'transparent', flexShrink: 0,
+                          width: 22, height: 22, borderRadius: 6, border: `2px solid ${selected ? meta.color : '#cbd5e1'}`,
+                          background: selected ? meta.color : '#ffffff', flexShrink: 0,
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          transition: 'all 0.15s ease',
                         }}>
-                          {selected && <CheckCircle size={12} color="#fff" />}
+                          {selected && <CheckCircle size={14} color="#fff" />}
                         </div>
-                        <Icon size={15} color={meta.color} />
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: 600, fontSize: '0.83rem', color: 'var(--text-main)' }}>{device.name}</div>
-                          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{device.device_id} · {meta.label}</div>
+                        <Icon size={16} color={meta.color} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-main)' }}>{device.name}</div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{device.device_id} · {meta.label}</div>
                         </div>
                         <DeviceStatusDot status={device.status} />
                       </div>
                     );
                   })}
                   {allDevices.length === 0 && (
-                    <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', textAlign: 'center', padding: 16 }}>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center', padding: '20px 16px', background: '#f8fafc', borderRadius: 12, border: '1px dashed #cbd5e1' }}>
                       No registered devices found. Add devices in Hardware & Devices first.
                     </div>
                   )}
                 </div>
               </div>
 
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 8 }}>
                 <button className="btn btn-secondary" onClick={() => setShowForm(false)}>Cancel</button>
                 <button className="btn btn-primary" onClick={handleSave} disabled={saving || !formData.name.trim()}>
-                  <Save size={14} /> {saving ? 'Saving…' : 'Save Group'}
+                  <Save size={15} /> {saving ? 'Saving…' : 'Save Group'}
                 </button>
               </div>
             </div>

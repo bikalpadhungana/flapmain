@@ -159,7 +159,7 @@ void showMsg(const char* msg, int ms = 1500) {
 }
 
 // ===================== HTTP POST HELPER =====================
-// Supports HTTP & HTTPS dynamically
+// Supports HTTP & HTTPS dynamically with status code checking and error sanitization
 String httpPost(const char* url, const String& payload) {
   HTTPClient http;
   WiFiClientSecure secureClient;
@@ -189,6 +189,19 @@ String httpPost(const char* url, const String& payload) {
   if (code > 0) {
     body = http.getString();
     Serial.printf("[HTTP] %d -> %s\n", code, body.c_str());
+
+    // Sanitize HTML or non-2xx responses to clean JSON so display shows readable HTTP errors
+    if (body.startsWith("<") || body.startsWith("<!")) {
+      body = "{\"status\":\"error\",\"display\":{\"line1\":\"HTML Response\",\"line2\":\"Server Error HTML\",\"line3\":\"Check API URL\"}}";
+    } else if (code == 401) {
+      body = "{\"status\":\"error\",\"display\":{\"line1\":\"HTTP 401 Error\",\"line2\":\"Invalid API Key\",\"line3\":\"Check config.h\"}}";
+    } else if (code == 403) {
+      body = "{\"status\":\"error\",\"display\":{\"line1\":\"HTTP 403 Error\",\"line2\":\"Device Pending\",\"line3\":\"Activate on Panel\"}}";
+    } else if (code == 404) {
+      body = "{\"status\":\"error\",\"display\":{\"line1\":\"HTTP 404 Error\",\"line2\":\"Endpoint 404\",\"line3\":\"Check TAP_URL\"}}";
+    } else if (code >= 500) {
+      body = "{\"status\":\"error\",\"display\":{\"line1\":\"HTTP " + String(code) + " Error\",\"line2\":\"Server Error\",\"line3\":\"Try again later\"}}";
+    }
   } else {
     Serial.println("[HTTP] error: " + http.errorToString(code));
   }
@@ -199,7 +212,11 @@ String httpPost(const char* url, const String& payload) {
 
 // Register device with server on boot
 void registerDevice() {
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonDocument doc;
+#else
   StaticJsonDocument<256> doc;
+#endif
   doc["device_id"]   = DEVICE_ID;
   doc["api_key"]     = API_KEY;
   doc["business_id"] = BUSINESS_ID;
@@ -216,9 +233,13 @@ void registerDevice() {
     return;
   }
 
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonDocument r;
+#else
   DynamicJsonDocument r(1024);
+#endif
   if (!deserializeJson(r, resp)) {
-    String bName = r["businessName"] | "unknown";
+    String bName = r["businessName"] | r["message"] | "unknown";
     String msg   = "Linked: " + bName;
     showMsg(msg.c_str(), 2000);
   }
@@ -351,7 +372,11 @@ void loop() {
   }
 
   // Build POST payload
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonDocument doc;
+#else
   StaticJsonDocument<320> doc;
+#endif
   doc["flapid"]      = "";
   doc["uid"]         = uid;
   doc["tag_uid"]     = uid; // Add this for flapcard compatibility
@@ -388,28 +413,34 @@ void loop() {
     line2  = uid.substring(0, 21);
     line3  = "Check server/WiFi";
   } else {
-    // Use a filter to ONLY parse the fields we need.
-    // The server includes a large base64 photo in the user object which
-    // overflows the ESP8266's limited RAM if we parse the whole response.
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+    JsonDocument filter;
+    filter["status"] = true;
+    filter["message"] = true;
+    filter["display"] = true;
+
+    JsonDocument resp;
+    DeserializationError err = deserializeJson(resp, body, DeserializationOption::Filter(filter));
+#else
     StaticJsonDocument<128> filter;
     filter["status"] = true;
     filter["message"] = true;
-    filter["display"]["line1"] = true;
-    filter["display"]["line2"] = true;
-    filter["display"]["line3"] = true;
+    filter["display"] = true;
 
-    DynamicJsonDocument resp(512);
+    DynamicJsonDocument resp(3072);
     DeserializationError err = deserializeJson(resp, body, DeserializationOption::Filter(filter));
+#endif
 
     if (err) {
       status = "error";
       line1  = "Bad JSON response";
       line2  = uid.substring(0, 21);
       line3  = String(err.c_str());
+      Serial.println("[JSON ERROR] " + String(err.c_str()) + " | Body: " + body);
     } else {
       status = resp["status"] | "error";
 
-      if (resp.containsKey("display")) {
+      if (resp["display"]) {
         line1 = resp["display"]["line1"] | "";
         line2 = resp["display"]["line2"] | "";
         line3 = resp["display"]["line3"] | "";

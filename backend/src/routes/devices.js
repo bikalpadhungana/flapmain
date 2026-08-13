@@ -5,7 +5,7 @@ const DeviceType = require('../models/DeviceType');
 const Reading = require('../models/Reading');
 const TapLog = require('../models/TapLog');
 const Org = require('../models/Org');
-const { authenticateUser } = require('../middleware/auth');
+const FusionGroup = require('../models/FusionGroup');
 
 const router = express.Router();
 
@@ -14,8 +14,12 @@ const hashKey = (key) => {
   return crypto.createHash('sha256').update(key).digest('hex');
 };
 
-// Active card tap session store for linking NFC Card Taps to Height & Weight Scale readings
+// Active card tap & Fusion Group session store for linking NFC Card Taps to Height & Weight Scale readings
+const activeFusionSessions = {}; // fusionGroupId -> session
 let activeTapSession = null;
+
+// Active device trigger sessions (initiated via ScaleMonitor UI or external platform API triggers)
+const activeTriggerSessions = {}; // device_id -> triggerSession
 
 
 // Telemetry Ingestion Handler (for ESP8266 Height+Weight Hardware and REST Clients)
@@ -85,14 +89,87 @@ const processTelemetry = async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Payload contains no valid schema fields' });
     }
 
-    // 4. Link with active card tap session (if card was tapped within last 5 minutes)
-    if (activeTapSession && (Date.now() - activeTapSession.timestamp < 300000)) {
-      validatedPayload.tapped_user_flapid = activeTapSession.flapid;
-      validatedPayload.tapped_card_uid = activeTapSession.uid;
-      if (activeTapSession.userInfo) {
-        validatedPayload.tapped_user_name = activeTapSession.userInfo.name || activeTapSession.userInfo.username;
+    // 4. Link with active card tap session & Fusion Group
+    let matchedSession = activeTapSession;
+    try {
+      const fusionGroup = await FusionGroup.findOne({ device_ids: device_id });
+      if (fusionGroup && activeFusionSessions[fusionGroup._id.toString()]) {
+        matchedSession = activeFusionSessions[fusionGroup._id.toString()];
       }
-      console.log(`[LINKED SCALE TELEMETRY TO TAPPED USER SESSION]: ${activeTapSession.flapid} (UID: ${activeTapSession.uid})`);
+    } catch (fErr) {
+      console.warn('Error querying Fusion Group for scale telemetry:', fErr.message);
+    }
+
+    if (matchedSession && (Date.now() - matchedSession.timestamp < 300000)) {
+      validatedPayload.tapped_user_flapid = matchedSession.flapid;
+      validatedPayload.tapped_card_uid = matchedSession.uid;
+      if (matchedSession.userInfo) {
+        validatedPayload.tapped_user_name = matchedSession.userInfo.name || matchedSession.userInfo.username || matchedSession.userInfo.primaryFlapid;
+      }
+      if (matchedSession.group_id) {
+        validatedPayload.fusion_group_id = matchedSession.group_id;
+        validatedPayload.fusion_group_name = matchedSession.group_name;
+      }
+
+      matchedSession.status = 'completed';
+      matchedSession.lastMeasurement = {
+        weight_kg: validatedPayload.weight_kg,
+        height_cm: validatedPayload.height_cm,
+        timestamp: Date.now()
+      };
+
+      console.log(`[SENSOR FUSION CORRELATION SUCCESS]: Paired scale measurement (${validatedPayload.weight_kg}kg, ${validatedPayload.height_cm || 0}cm) with user ${validatedPayload.tapped_user_name || matchedSession.flapid} in group '${matchedSession.group_name || 'Workstation'}'`);
+    }
+
+    // Check if an active trigger session exists for this device (e.g. initiated from ScaleMonitor or external API)
+    const triggerSession = activeTriggerSessions[device_id];
+    if (triggerSession && (Date.now() - triggerSession.timestamp < 300000)) {
+      validatedPayload.external_user_id = triggerSession.external_user_id;
+      if (triggerSession.user_name) {
+        validatedPayload.tapped_user_name = triggerSession.user_name;
+      }
+      validatedPayload.trigger_session_id = triggerSession.session_id;
+
+      triggerSession.status = 'completed';
+      triggerSession.lastReading = {
+        weight_kg: validatedPayload.weight_kg,
+        height_cm: validatedPayload.height_cm,
+        timestamp: new Date().toISOString()
+      };
+
+      console.log(`[DEVICE TRIGGER MEASUREMENT COMPLETED]: Scale ${device_id} completed reading for user ${triggerSession.external_user_id} (${validatedPayload.weight_kg}kg, ${validatedPayload.height_cm || 0}cm)`);
+
+      // Asynchronously post measurement data to external platform callback URL if configured
+      if (triggerSession.callback_url) {
+        const callbackUrl = triggerSession.callback_url;
+        const callbackPayload = {
+          event: 'scale.measurement_completed',
+          session_id: triggerSession.session_id,
+          device_id,
+          external_user_id: triggerSession.external_user_id,
+          user_name: triggerSession.user_name || triggerSession.external_user_id,
+          weight_kg: validatedPayload.weight_kg,
+          height_cm: validatedPayload.height_cm,
+          bmi: (validatedPayload.height_cm > 0 && validatedPayload.weight_kg > 0)
+            ? Number((validatedPayload.weight_kg / Math.pow(validatedPayload.height_cm / 100, 2)).toFixed(1))
+            : null,
+          timestamp: new Date().toISOString()
+        };
+
+        // Fire-and-forget async fetch call to external platform API
+        fetch(callbackUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'FlapMain-IoT-Engine/2.3'
+          },
+          body: JSON.stringify(callbackPayload)
+        }).then(cbRes => {
+          console.log(`[EXTERNAL WEBHOOK DELIVERED]: Posted reading to ${callbackUrl} (HTTP ${cbRes.status})`);
+        }).catch(cbErr => {
+          console.warn(`[EXTERNAL WEBHOOK ERROR]: Failed to post to ${callbackUrl}: ${cbErr.message}`);
+        });
+      }
     }
 
     // 5. Write to time-series DB
@@ -115,6 +192,16 @@ const processTelemetry = async (req, res) => {
       const io = require('../socket').getIO();
       io.emit('new_scale_reading', reading);
       io.emit('new_telemetry', reading);
+      if (triggerSession) {
+        io.emit('scale_measurement_completed', {
+          device_id,
+          session_id: triggerSession.session_id,
+          external_user_id: triggerSession.external_user_id,
+          user_name: triggerSession.user_name,
+          reading: validatedPayload,
+          external_forwarded: !!triggerSession.callback_url
+        });
+      }
     } catch (wsErr) {
       console.warn('Could not emit Socket.io event:', wsErr.message);
     }
@@ -594,29 +681,76 @@ router.get('/ping', (req, res) => {
     // Prioritize VPS response (mainResponse) over localResponse for the final display
     const finalResponse = mainResponse || localResponse || {};
 
+    const userName = (finalResponse.holder && (finalResponse.holder.name || finalResponse.holder.username || finalResponse.holder.primaryFlapid)) ||
+                     (finalResponse.data && (finalResponse.data.name || finalResponse.data.username || finalResponse.data.flapid)) ||
+                     (finalResponse.user && finalResponse.user.name) ||
+                     'Card User';
+
     // Store active tap session for height & weight scale session correlation
     activeTapSession = {
       uid: uidStr,
       flapid: req.body.flapid || finalResponse.flapid || (finalResponse.holder && finalResponse.holder.primaryFlapid) || (finalResponse.data && finalResponse.data.flapid) || 'FLAP-CARD-USER',
-      userInfo: finalResponse.holder || finalResponse.data || finalResponse.user || null,
+      userInfo: finalResponse.holder || finalResponse.data || finalResponse.user || { name: userName },
       timestamp: Date.now()
     };
+
+    // Check if card reader is part of a Fusion Group (e.g. paired with a weight scale or height sensor)
+    try {
+      const fusionGroup = await FusionGroup.findOne({ device_ids: req.body.device_id });
+      if (fusionGroup) {
+        activeTapSession.group_id = fusionGroup._id.toString();
+        activeTapSession.group_name = fusionGroup.name;
+
+        activeFusionSessions[fusionGroup._id.toString()] = activeTapSession;
+
+        // Check if Fusion Group has a scale or weighing machine device
+        const pairedScale = await Device.findOne({
+          device_id: { $in: fusionGroup.device_ids },
+          $or: [
+            { device_type: /scale/i },
+            { device_type: /weight/i },
+            { device_type: /height/i },
+            { device_type: /weighing/i }
+          ]
+        });
+
+        if (pairedScale) {
+          finalResponse.display = {
+            line1: userName.substring(0, 21),
+            line2: 'Step on scale!',
+            line3: 'Awaiting weight...',
+          };
+          console.log(`[SENSOR FUSION WORKSTATION]: Card tap on ${req.body.device_id} matched Fusion Group '${fusionGroup.name}' paired with scale '${pairedScale.device_id}'. OLED prompt: Step on scale!`);
+        }
+
+        // Broadcast real-time sensor fusion event to dashboard
+        try {
+          const io = require('../socket').getIO();
+          io.emit('sensor_fusion_tap', {
+            group_id: fusionGroup._id.toString(),
+            group_name: fusionGroup.name,
+            device_id: req.body.device_id,
+            uid: uidStr,
+            user: { name: userName, flapid: activeTapSession.flapid },
+            timestamp: new Date()
+          });
+        } catch (wsErr) {
+          console.warn('Could not emit Socket.io fusion event:', wsErr.message);
+        }
+      }
+    } catch (fgErr) {
+      console.warn('Error checking Fusion Group for tap:', fgErr.message);
+    }
+
     console.log('[ACTIVE TAP SESSION RECORDED FOR SCALE CORRELATION]:', activeTapSession);
 
     res.status(200).json({
-
       status: finalResponse.status || 'success',
       message: finalResponse.message || (mainForwarded ? 'Tap event saved on local system & forwarded' : 'Tap event saved locally and queued for offline sync'),
       display: finalResponse.display || {
         line1: 'Flap System',
         line2: uidStr.substring(0, 21),
         line3: mainForwarded ? 'Saved on Local System' : 'Saved Offline (Queued)',
-      },
-      data: tapPayload,
-      localSavedId: savedRecord?._id || null,
-      forwarding: {
-        localDevice: { url: localTargetUrl, forwarded: localForwarded, error: localError, response: localResponse },
-        mainServer: { url: mainServerUrl, forwarded: mainForwarded, error: mainError, response: mainResponse },
       },
     });
   });
@@ -644,9 +778,10 @@ router.get('/ping', (req, res) => {
 
 
 // @route   POST /tags/lookup
+// @route   POST /lookup
 // @desc    Lookup tag UID details
 // @access  Public
-router.post('/tags/lookup', (req, res) => {
+router.post(['/tags/lookup', '/lookup'], (req, res) => {
   const { uid, flapid, type } = req.body;
   res.json({
     status: 'success',
@@ -657,6 +792,91 @@ router.post('/tags/lookup', (req, res) => {
     accessGranted: true,
     timestamp: new Date(),
   });
+});
+
+// @route   POST /api/v1/devices/:device_id/trigger
+// @route   POST /api/v1/devices/trigger
+// @desc    Initiate scale measurement session for device & register optional external webhook callback
+// @access  Public / Authenticated
+router.post(['/trigger', '/:device_id/trigger'], async (req, res) => {
+  const device_id = req.params.device_id || req.body.device_id;
+  const { external_user_id, user_name, callback_url, notes } = req.body;
+
+  if (!device_id) {
+    return res.status(400).json({ status: 'error', message: 'Missing device_id in request' });
+  }
+
+  try {
+    const device = await Device.findOne({ device_id });
+    if (!device) {
+      return res.status(404).json({ status: 'error', message: `Device '${device_id}' not found in system registry` });
+    }
+
+    const sessionId = 'trig_' + Date.now();
+    const sessionObj = {
+      session_id: sessionId,
+      device_id,
+      external_user_id: external_user_id || req.body.user_id || 'EXTERNAL_USER',
+      user_name: user_name || req.body.name || external_user_id || 'External User',
+      callback_url: callback_url || req.body.webhook_url || null,
+      notes: notes || '',
+      timestamp: Date.now(),
+      status: 'initiated'
+    };
+
+    activeTriggerSessions[device_id] = sessionObj;
+
+    console.log(`[DEVICE TRIGGER INITIATED]: Device '${device_id}' ready for measurement for user '${sessionObj.external_user_id}'. Callback: ${sessionObj.callback_url || 'None'}`);
+
+    // Emit Socket.io event to notify hardware and dashboards
+    try {
+      const io = require('../socket').getIO();
+      io.emit('device_trigger_initiated', sessionObj);
+    } catch (wsErr) {
+      console.warn('Could not emit device_trigger_initiated event:', wsErr.message);
+    }
+
+    res.status(200).json({
+      status: 'success',
+      session_id: sessionId,
+      device_id,
+      external_user_id: sessionObj.external_user_id,
+      user_name: sessionObj.user_name,
+      message: 'Scale measurement session initiated. Device ready to capture height & weight.',
+      callback_url: sessionObj.callback_url,
+      display: {
+        line1: 'Device Ready!',
+        line2: 'Step on scale',
+        line3: sessionObj.user_name.substring(0, 21)
+      }
+    });
+  } catch (err) {
+    console.error('Error initiating device trigger:', err);
+    res.status(500).json({ status: 'error', message: 'Internal server error initiating scale measurement' });
+  }
+});
+
+// @route   GET /api/v1/devices/:device_id/trigger-status
+// @desc    Poll trigger status for scale hardware or external integrations
+// @access  Public
+router.get(['/:device_id/trigger-status', '/trigger-status'], (req, res) => {
+  const device_id = req.params.device_id || req.query.device_id;
+  const session = activeTriggerSessions[device_id];
+
+  if (session && (Date.now() - session.timestamp < 300000)) {
+    return res.json({
+      active: true,
+      status: session.status,
+      session_id: session.session_id,
+      device_id: session.device_id,
+      external_user_id: session.external_user_id,
+      user_name: session.user_name,
+      callback_url: session.callback_url,
+      lastReading: session.lastReading || null
+    });
+  }
+
+  res.json({ active: false, status: 'idle', device_id });
 });
 
 // @route   GET /logs/system

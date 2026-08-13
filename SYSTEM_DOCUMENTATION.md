@@ -2360,3 +2360,93 @@ async function syncData100() {
 }
 ```
 
+## 14. System Changelog, Recent Technical Updates & Future Architecture Guidelines
+
+### 14.1 Summary of Recent System Changes & Hardware Resolutions
+
+#### 14.1.1 IoT Hardware Telemetry & Microcontroller Payload Optimization
+- **Problem:** Microcontrollers such as ESP8266 (with limited ~80KB RAM) experienced memory allocation failures and displayed `Bad JSON response` / `InvalidInput` when tapping cards.
+- **Root Cause:** The `/api/device/tap` backend endpoint returned a bloated JSON payload (~1,000 bytes) containing recursive VPS forwarding responses, raw target response dumps, and internal API keys.
+- **Solution:** 
+  - Refactored `backend/src/routes/devices.js` to return a concise, targeted HTTP response payload (~130 bytes) containing only `status`, `message`, and `display` (`line1`, `line2`, `line3`).
+  - Full forwarding analytics, VPS target responses, and tap payload metadata continue to be stored in MongoDB (`TapLog` model) and broadcasted via Socket.io to real-time administrative dashboards (`SystemMonitor.jsx`).
+
+#### 14.1.2 Dual ArduinoJson (v6 & v7) Preprocessor Compatibility & Buffer Memory Expansion
+- **Problem:** When connecting to un-updated remote production VPS instances (`https://main.flap.com.np`), the server sends a 935-byte JSON response. In ArduinoJson 6, `DynamicJsonDocument(1024)` ran out of memory space during token parsing, returning `DeserializationError::NoMemory` on the card reader display.
+- **Solution:**
+  - Expanded `DynamicJsonDocument` allocation buffer to 3,072 bytes (3KB) for ArduinoJson 6 and enabled `DeserializationOption::Filter` targeting `status`, `message`, and `display`.
+  - The filter discards heavy `data` and `forwarding` objects during stream token parsing, reducing memory footprint to ~80 bytes and eliminating `NoMemory` errors regardless of payload size.
+  - Updated `hardwarecode/flap_cardreader/flap_cardreader.ino` with preprocessor conditional compilation (`#if ARDUINOJSON_VERSION_MAJOR >= 7`).
+
+#### 14.1.3 HTTP Status Code Interception, HTML Guards & OLED Display Error Handling
+- **Problem:** When endpoints returned non-200 HTTP status codes (such as HTTP 401 Unauthorized or 404 Not Found) or HTML responses (such as captive portal or proxy HTML), the ESP8266 `httpPost()` helper returned raw HTML string bodies (e.g. `<!DOCTYPE html>...`), causing `deserializeJson()` to fail with `InvalidInput`.
+- **Solution:**
+  - Enhanced `httpPost()` in `flap_cardreader.ino` with HTML tag detection (`body.startsWith("<")`) and HTTP status code inspection.
+  - Automatically converts HTTP error status codes (401, 403, 404, 500) and HTML bodies into formatted JSON display payloads before passing them to the OLED renderer:
+    - `HTML Response` → `line1: "HTML Response"`, `line2: "Server Error HTML"`, `line3: "Check API URL"`
+    - `HTTP 401` → `line1: "HTTP 401 Error"`, `line2: "Invalid API Key"`, `line3: "Check config.h"`
+    - `HTTP 403` → `line1: "HTTP 403 Error"`, `line2: "Device Pending"`, `line3: "Activate on Panel"`
+    - `HTTP 404` → `line1: "HTTP 404 Error"`, `line2: "Endpoint 404"`, `line3: "Check TAP_URL"`
+
+#### 14.1.4 Endpoint Path, Route Alias & Configuration Correction
+- **Problem:** `config.h` contained `#define FLAPMAIN_SERVER "https://main.flap.com.np/api"`, which produced double `/api/api` paths. Additionally, `/api/tags/lookup` returned HTTP 404 because `devices.js` only defined `/tags/lookup` mounted under `/api/tags` (resolving to `/api/tags/tags/lookup`).
+- **Solution:**
+  - Corrected `FLAPMAIN_SERVER` to `"https://main.flap.com.np"` in `config.h`.
+  - Added route alias `router.post(['/tags/lookup', '/lookup'], ...)` in `backend/src/routes/devices.js` so `POST /api/tags/lookup` returns HTTP 200 OK.
+
+#### 14.1.6 Card Reader + Weighing Machine Sensor Fusion Workstation Correlation
+- **Workflow & Requirement:** When an administrator pairs an NFC Card Reader (`nfc_reader`) and a Weighing Machine (`weight_scale_v1`) into a Fusion Group in the Sensor Fusion page (`/fusion`), card taps and scale readings must operate as a unified workstation:
+  1. User taps NFC card on Card Reader terminal.
+  2. System validates user identity and checks if Card Reader belongs to a Fusion Group paired with a scale.
+  3. Card Reader OLED display displays user name on line 1 and step-by-step instructions on lines 2-3: `Step on scale!` / `Awaiting weight...`.
+  4. When user steps on Weighing Machine, scale sends weight & height telemetry (`POST /v1/devices/data`).
+  5. System links scale measurement directly to the active tapped user identity (`tapped_user_flapid`, `tapped_card_uid`, `tapped_user_name`), stores correlated document in MongoDB (`Reading` collection), updates active session, and broadcasts real-time updates via Socket.io to `SensorFusion.jsx` workstation cards.
+#### 14.1.7 Scale Monitor Device Triggering & Third-Party Webhook API Architecture
+- **Workflow & Requirement:** External platforms (e.g. FlapCard, Hospital EMRs, Clinic Systems, custom SaaS) or local operators via `ScaleMonitor.jsx` can initiate a measurement session for a scale device:
+  1. Operator or external platform sends `POST /api/v1/devices/:device_id/trigger` with `{ external_user_id, user_name, callback_url }`.
+  2. Backend registers an active `triggerSession` for `:device_id` and broadcasts `device_trigger_initiated` via Socket.io.
+  3. `ScaleMonitor.jsx` displays `● DEVICE READY — AWAITING STEP ON SCALE` with animated readiness indicator.
+  4. When the user steps on the scale, the hardware captures weight and height and POSTs telemetry (`POST /v1/devices/data`).
+  5. System links telemetry to `external_user_id`, stores correlated reading in MongoDB, updates Scale Monitor dashboard, and automatically executes an HTTP POST webhook to `callback_url` with payload:
+     ```json
+     {
+       "event": "scale.measurement_completed",
+       "session_id": "trig_1723500000000",
+       "device_id": "scale_hw_001",
+       "external_user_id": "PATIENT-1042",
+       "user_name": "John Doe",
+       "weight_kg": 72.5,
+       "height_cm": 175.0,
+       "bmi": 23.7,
+       "timestamp": "2026-08-13T16:40:00.000Z"
+     }
+     ```
+- **Endpoints Provided for Third-Party Integrations:**
+  - `POST /api/v1/devices/:device_id/trigger` — Trigger measurement session & register optional callback URL.
+  - `GET /api/v1/devices/:device_id/trigger-status` — Poll active trigger readiness and latest completed measurement.
+
+---
+
+### 14.2 Future Architecture & Development Protocols
+
+To maintain system integrity as FlapMain scales across edge locations and cloud environments, developers and AI agents must adhere to the following mandatory protocols:
+
+#### Rule 1: Microcontroller Payload Constraint (Payload Budget < 250 Bytes)
+- All HTTP endpoints consumed by hardware microcontrollers (ESP8266, ESP32, STM32, Arduino) **must not exceed 250 bytes** in response body size.
+- Store extended logs, forwarding details, and telemetry records in MongoDB and push to frontend dashboards via Socket.io rather than returning them in the hardware HTTP response.
+
+#### Rule 2: Robust Non-2xx HTTP Error Handling on Microcontrollers
+- Hardware sketches making HTTP requests **must validate HTTP status codes** before attempting JSON parsing.
+- HTML error pages (404, 500, 502) must never be passed directly to JSON deserializers. Always sanitize or convert non-2xx status codes into predictable status tuples.
+
+#### Rule 3: Version-Agnostic Arduino Libraries
+- Firmware sketches in `hardwarecode/` must remain compatible across major library versions (specifically `ArduinoJson` 6.x and 7.x).
+- Use `#if ARDUINOJSON_VERSION_MAJOR >= 7` preprocessor checks for any memory allocation or deserialization logic.
+
+#### Rule 4: Design System Form Control Usage
+- Every input, select, and textarea in the React frontend must utilize either `.form-input` or `.form-control` inside a `.form-group` container with `display: block` labels to guarantee responsive layout rendering across light and dark themes.
+
+#### Rule 5: Edge-to-Cloud Forwarding & Session Linkage
+- When operating in `NODE_ROLE=edge`, local ingestion endpoints must persist tap and scale telemetry locally first, correlate active user sessions across devices (e.g. matching NFC card taps to medical scale readings), and forward to cloud VPS instances using secure server-to-server credentials (`FLAP_SERVER_API_KEY`).
+
+

@@ -17,6 +17,11 @@
   --action-primary: #635bff;
   --action-primary-hover: #5046e5;
   
+  /* Fallback aliases for component surface & border resolution */
+  --surface: #ffffff;
+  --border: rgba(0, 0, 0, 0.08);
+  --bg: #f7f9fc;
+  
   /* Accent */
   --accent: #635bff;
   --accent-hover: #5046e5;
@@ -261,7 +266,7 @@ p {
   letter-spacing: -0.01em;
 }
 
-.form-input {
+.form-input, .form-control {
   width: 100%;
   background: #ffffff;
   border: 1px solid var(--border-strong);
@@ -273,12 +278,12 @@ p {
   transition: var(--transition);
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.02);
 }
-.form-input:focus {
+.form-input:focus, .form-control:focus {
   border-color: var(--border-focus);
   outline: none;
   box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.15), inset 0 1px 2px rgba(0,0,0,0.02);
 }
-.form-input::placeholder {
+.form-input::placeholder, .form-control::placeholder {
   color: #94a3b8;
 }
 

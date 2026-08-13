@@ -2,7 +2,7 @@
 #define CONFIG_H
 
 // --- FlapMain Arduino Hardware Config (Local System) ---
-#define FLAPMAIN_SERVER    "https://main.flap.com.np/api"
+#define FLAPMAIN_SERVER    "https://main.flap.com.np"
 #define FLAPMAIN_DEVICE_ID "flap-card-w0f5"
 #define FLAPMAIN_DEVICE_KEY "flap_dev_dd27a6d26219108b50b8c5704fc94ef641da51089b13289a"
 
