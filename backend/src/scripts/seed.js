@@ -89,6 +89,23 @@ const seed = async () => {
         },
         commands: ['trigger_ping'],
       },
+      {
+        device_type: 'weather_station_v1',
+        display_name: 'FlapMain Weather Station Pro',
+        fields: {
+          wind_speed: { type: 'number', unit: 'km/h' },
+          wind_direction: { type: 'string', unit: 'dir' },
+          temperature: { type: 'number', unit: '°C' },
+          humidity: { type: 'number', unit: '%' },
+          pressure: { type: 'number', unit: 'Pa' },
+          altitude: { type: 'number', unit: 'm' },
+          light: { type: 'number', unit: 'lux' },
+          time: { type: 'string', unit: 'time' },
+          ap_bssid: { type: 'string', unit: 'bssid' },
+          rssi: { type: 'number', unit: 'dBm' }
+        },
+        commands: [],
+      },
     ];
 
     for (const dt of deviceTypes) {
@@ -99,6 +116,7 @@ const seed = async () => {
     console.log('Seeding demo devices...');
     const api_key_hash = crypto.createHash('sha256').update('flap-key-001').digest('hex');
     const scale_api_key_hash = crypto.createHash('sha256').update('scale-key-001').digest('hex');
+    const aws_api_key_hash = crypto.createHash('sha256').update('flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca').digest('hex');
 
     await Device.create({
       device_id: 'ccc853990e8670ac94ecc4fcfdcb1988',
@@ -121,7 +139,18 @@ const seed = async () => {
       status: 'online',
       activation_status: 'active',
     });
-    console.log('Demo NFC reader and Height & Weight scale device seeded successfully.');
+
+    await Device.create({
+      device_id: 'flap-flap-aws-001-7zhj',
+      org_id: defaultOrg._id,
+      device_type: 'weather_station_v1',
+      name: 'FlapMain Weather Station Pro #1',
+      location: 'Roof Telemetry Deck',
+      api_key_hash: aws_api_key_hash,
+      status: 'online',
+      activation_status: 'active',
+    });
+    console.log('Demo NFC reader, Height & Weight scale, and Weather Station devices seeded successfully.');
 
 
     console.log('Database seeding completed successfully!');

@@ -6,6 +6,7 @@ const Reading = require('../models/Reading');
 const TapLog = require('../models/TapLog');
 const Org = require('../models/Org');
 const FusionGroup = require('../models/FusionGroup');
+const { authenticateUser } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -38,17 +39,31 @@ const processTelemetry = async (req, res) => {
       const defaultOrg = (await Org.findOne({ slug: 'flap' })) || (await Org.findOne());
       if (defaultOrg) {
         const keyToHash = deviceKey || 'flap-key-001';
+        let detectedType = (req.body.device_type || '').toLowerCase();
+        if (!detectedType) {
+          if (req.body.wind_speed !== undefined || req.body.wind_direction !== undefined || device_id.includes('aws') || device_id.includes('weather')) {
+            detectedType = 'weather_station_v1';
+          } else if (req.body.stream_url !== undefined || device_id.includes('cam')) {
+            detectedType = 'esp32_cam_v1';
+          } else {
+            detectedType = 'weight_scale_v1';
+          }
+        }
+        let displayName = `Height & Weight Scale (${device_id})`;
+        if (detectedType === 'weather_station_v1') displayName = `FlapMain Weather Station Pro (${device_id})`;
+        if (detectedType === 'esp32_cam_v1') displayName = `ESP32-CAM Live Surveillance (${device_id})`;
+
         device = await Device.create({
           device_id,
           org_id: defaultOrg._id,
-          device_type: (req.body.device_type || 'weight_scale_v1').toLowerCase(),
-          name: `Height & Weight Scale (${device_id})`,
-          location: 'Main Terminal',
+          device_type: detectedType,
+          name: displayName,
+          location: 'Main Station',
           api_key_hash: hashKey(keyToHash),
           status: 'online',
           activation_status: 'active',
         });
-        console.log(`[AUTO-PROVISIONED HEIGHT/WEIGHT SCALE DEVICE]: ${device_id}`);
+        console.log(`[AUTO-PROVISIONED ${detectedType.toUpperCase()} DEVICE]: ${device_id}`);
       } else {
         return res.status(404).json({ status: 'error', message: 'Device not registered' });
       }
@@ -84,6 +99,25 @@ const processTelemetry = async (req, res) => {
     // Direct fallback mapping for height & weight sensors
     if (payload.weight_kg !== undefined) validatedPayload.weight_kg = Number(payload.weight_kg);
     if (payload.height_cm !== undefined) validatedPayload.height_cm = Number(payload.height_cm);
+
+    // Direct fallback mapping for Weather Station sensors
+    if (payload.wind_speed !== undefined) validatedPayload.wind_speed = Number(payload.wind_speed);
+    if (payload.wind_direction !== undefined) validatedPayload.wind_direction = String(payload.wind_direction);
+    if (payload.temperature !== undefined) validatedPayload.temperature = Number(payload.temperature);
+    if (payload.humidity !== undefined) validatedPayload.humidity = Number(payload.humidity);
+    if (payload.pressure !== undefined) validatedPayload.pressure = Number(payload.pressure);
+    if (payload.altitude !== undefined) validatedPayload.altitude = Number(payload.altitude);
+    if (payload.light !== undefined) validatedPayload.light = Number(payload.light);
+    if (payload.time !== undefined) validatedPayload.time = String(payload.time);
+    if (payload.ap_bssid !== undefined) validatedPayload.ap_bssid = String(payload.ap_bssid);
+
+    // Direct fallback mapping for ESP32-CAM Camera devices
+    if (payload.stream_url !== undefined) validatedPayload.stream_url = String(payload.stream_url);
+    if (payload.capture_url !== undefined) validatedPayload.capture_url = String(payload.capture_url);
+    if (payload.ip_address !== undefined) validatedPayload.ip_address = String(payload.ip_address);
+    if (payload.status !== undefined) validatedPayload.status = String(payload.status);
+    if (payload.rssi !== undefined) validatedPayload.rssi = Number(payload.rssi);
+    if (payload.rssi !== undefined) validatedPayload.rssi = Number(payload.rssi);
 
     if (Object.keys(validatedPayload).length === 0) {
       return res.status(400).json({ status: 'error', message: 'Payload contains no valid schema fields' });
@@ -190,8 +224,15 @@ const processTelemetry = async (req, res) => {
     // Emit Socket.io event for real-time dashboards
     try {
       const io = require('../socket').getIO();
-      io.emit('new_scale_reading', reading);
+      if (validatedPayload.wind_speed !== undefined || validatedPayload.wind_direction !== undefined || device.device_type === 'weather_station_v1') {
+        io.emit('new_weather_reading', reading);
+      } else if (validatedPayload.stream_url !== undefined || device.device_type === 'esp32_cam_v1') {
+        io.emit('new_camera_reading', reading);
+      } else {
+        io.emit('new_scale_reading', reading);
+      }
       io.emit('new_telemetry', reading);
+
       if (triggerSession) {
         io.emit('scale_measurement_completed', {
           device_id,
@@ -223,6 +264,153 @@ router.get('/ping', (req, res) => {
     timestamp: new Date(),
     ip: req.ip,
   });
+});
+
+// In-memory Camera Frame Cache, Flash State & MJPEG Stream Subscriber Map
+const latestCameraFrames = {};
+const cameraStreamSubscribers = {};
+const cameraFlashState = {};
+
+// @route   POST /v1/devices/:device_id/control
+// @route   POST /api/v1/devices/:device_id/control
+// @desc    Control device hardware parameters (e.g. Flash LED ON/OFF)
+// @access  Public / Private
+router.post('/:device_id/control', async (req, res) => {
+  const { device_id } = req.params;
+  const variable = req.body.variable || req.body.var || 'flash';
+  const val = req.body.val !== undefined ? Number(req.body.val) : (req.body.flash ? 1 : 0);
+
+  if (variable === 'flash' || variable === 'led' || variable === 'led_intensity') {
+    cameraFlashState[device_id] = val;
+  }
+
+  // Attempt direct local IP HTTP request to device if IP is stored
+  try {
+    const deviceDoc = await Device.findOne({ device_id });
+    const lastTel = await Reading.findOne({ device_id }).sort({ timestamp: -1 });
+    const ip = (lastTel && lastTel.payload && lastTel.payload.ip_address) || (deviceDoc && deviceDoc.ip_address);
+    if (ip) {
+      fetch(`http://${ip}/control?var=${variable}&val=${val}`).catch(() => {});
+      fetch(`http://${ip}/control?var=flash&val=${val}`).catch(() => {});
+      fetch(`http://${ip}/control?var=led_intensity&val=${val}`).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('Direct camera IP control fetch warning:', err.message);
+  }
+
+  try {
+    const io = require('../socket').getIO();
+    io.emit('camera_control_updated', { device_id, variable, val });
+  } catch (e) {}
+
+  res.json({ status: 'ok', message: `Control parameter '${variable}' set to ${val} for ${device_id}`, device_id, variable, val });
+});
+
+// @route   POST /v1/devices/camera/upload
+// @desc    Direct JPEG image frame upload endpoint for ESP32-CAM and remote clients
+// @access  Public (Authenticated via Device Headers or Query)
+router.post('/camera/upload', async (req, res) => {
+  const device_id = req.headers['x-device-id'] || req.headers['device_id'] || req.query.device_id || (req.body && req.body.device_id) || 'flap-esp32-cam-001';
+  let imgBuffer = null;
+
+  if (Buffer.isBuffer(req.body)) {
+    imgBuffer = req.body;
+  } else if (req.body && req.body.image_base64) {
+    const base64Str = req.body.image_base64.replace(/^data:image\/\w+;base64,/, '');
+    imgBuffer = Buffer.from(base64Str, 'base64');
+  } else if (typeof req.body === 'string') {
+    const base64Str = req.body.replace(/^data:image\/\w+;base64,/, '');
+    imgBuffer = Buffer.from(base64Str, 'base64');
+  }
+
+  if (!imgBuffer || imgBuffer.length === 0) {
+    return res.status(400).json({ status: 'error', message: 'No valid JPEG image buffer or Base64 string received' });
+  }
+
+  const timestamp = Date.now();
+  latestCameraFrames[device_id] = {
+    buffer: imgBuffer,
+    timestamp
+  };
+
+  // 1. Broadcast Base64 frame to frontend Socket.io clients
+  try {
+    const io = require('../socket').getIO();
+    const base64Url = `data:image/jpeg;base64,${imgBuffer.toString('base64')}`;
+    io.emit('new_camera_frame', {
+      device_id,
+      image_base64: base64Url,
+      timestamp
+    });
+  } catch (wsErr) {
+    console.warn('Socket.io camera frame broadcast warning:', wsErr.message);
+  }
+
+  // 2. Broadcast raw frame to active HTTP MJPEG stream subscribers
+  const subscribers = cameraStreamSubscribers[device_id];
+  if (subscribers && subscribers.size > 0) {
+    for (const clientRes of subscribers) {
+      try {
+        clientRes.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${imgBuffer.length}\r\n\r\n`);
+        clientRes.write(imgBuffer);
+        clientRes.write('\r\n');
+      } catch (err) {
+        subscribers.delete(clientRes);
+      }
+    }
+  }
+
+  const currentFlash = cameraFlashState[device_id] !== undefined ? cameraFlashState[device_id] : 0;
+  res.status(200).json({ status: 'ok', message: 'Frame uploaded and broadcasted successfully', bytes: imgBuffer.length, timestamp, flash: currentFlash, flash_on: currentFlash > 0 });
+});
+
+// @route   GET /v1/devices/:device_id/camera/stream
+// @desc    Global Cloud MJPEG Video Stream Proxy for any browser client
+// @access  Public
+router.get('/:device_id/camera/stream', (req, res) => {
+  const { device_id } = req.params;
+
+  res.writeHead(200, {
+    'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Connection': 'close',
+    'Pragma': 'no-cache'
+  });
+
+  if (!cameraStreamSubscribers[device_id]) {
+    cameraStreamSubscribers[device_id] = new Set();
+  }
+  cameraStreamSubscribers[device_id].add(res);
+
+  // If a frame already exists, immediately send current frame to fast-start stream
+  if (latestCameraFrames[device_id] && latestCameraFrames[device_id].buffer) {
+    const buf = latestCameraFrames[device_id].buffer;
+    try {
+      res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${buf.length}\r\n\r\n`);
+      res.write(buf);
+      res.write('\r\n');
+    } catch (e) {}
+  }
+
+  req.on('close', () => {
+    if (cameraStreamSubscribers[device_id]) {
+      cameraStreamSubscribers[device_id].delete(res);
+    }
+  });
+});
+
+// @route   GET /v1/devices/:device_id/camera/snapshot
+// @desc    Get latest camera snapshot JPEG image buffer
+// @access  Public
+router.get('/:device_id/camera/snapshot', (req, res) => {
+  const { device_id } = req.params;
+  const frame = latestCameraFrames[device_id];
+
+  if (!frame || !frame.buffer) {
+    return res.status(444).json({ status: 'error', message: 'No frame captured yet for device' });
+  }
+
+  res.type('image/jpeg').send(frame.buffer);
 });
 
 // @route   POST /v1/devices/data

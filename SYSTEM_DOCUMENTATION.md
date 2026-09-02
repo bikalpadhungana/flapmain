@@ -2402,8 +2402,9 @@ async function syncData100() {
   4. When user steps on Weighing Machine, scale sends weight & height telemetry (`POST /v1/devices/data`).
   5. System links scale measurement directly to the active tapped user identity (`tapped_user_flapid`, `tapped_card_uid`, `tapped_user_name`), stores correlated document in MongoDB (`Reading` collection), updates active session, and broadcasts real-time updates via Socket.io to `SensorFusion.jsx` workstation cards.
 #### 14.1.7 Scale Monitor Device Triggering & Third-Party Webhook API Architecture
+- **Production System Host:** `https://main.esainnovation.com` (API Base: `https://main.esainnovation.com/api`)
 - **Workflow & Requirement:** External platforms (e.g. FlapCard, Hospital EMRs, Clinic Systems, custom SaaS) or local operators via `ScaleMonitor.jsx` can initiate a measurement session for a scale device:
-  1. Operator or external platform sends `POST /api/v1/devices/:device_id/trigger` with `{ external_user_id, user_name, callback_url }`.
+  1. Operator or external platform sends `POST https://main.esainnovation.com/api/v1/devices/:device_id/trigger` with `{ external_user_id, user_name, callback_url }`.
   2. Backend registers an active `triggerSession` for `:device_id` and broadcasts `device_trigger_initiated` via Socket.io.
   3. `ScaleMonitor.jsx` displays `● DEVICE READY — AWAITING STEP ON SCALE` with animated readiness indicator.
   4. When the user steps on the scale, the hardware captures weight and height and POSTs telemetry (`POST /v1/devices/data`).
@@ -2422,8 +2423,35 @@ async function syncData100() {
      }
      ```
 - **Endpoints Provided for Third-Party Integrations:**
-  - `POST /api/v1/devices/:device_id/trigger` — Trigger measurement session & register optional callback URL.
-  - `GET /api/v1/devices/:device_id/trigger-status` — Poll active trigger readiness and latest completed measurement.
+  - `POST https://main.esainnovation.com/api/v1/devices/:device_id/trigger` — Trigger measurement session & register optional callback URL.
+  - `GET https://main.esainnovation.com/api/v1/devices/:device_id/trigger-status` — Poll active trigger readiness and latest completed measurement.
+- **Dedicated Guide:** Complete integration code samples (Node.js, Python, cURL, WebSockets) are documented in **[THIRD_PARTY_INTEGRATION_GUIDE.md](file:///Users/bikalpadhungana/Documents/bikalpakolab/software/flapmain/THIRD_PARTY_INTEGRATION_GUIDE.md)**.
+
+#### 14.1.8 Height & Weight Scale Responsive Sampling & Local Trigger Endpoint
+- **Hardware Timing Optimization:** Reduced `MEASURE_INTERVAL` in `hardwarecode/esp8266_weight_scale/esp8266_weight_scale.ino` from `600ms` to `300ms` to provide double the sampling frequency for HX711 weight load cell and ultrasonic height sensor readings.
+- **Local Trigger Route:** Added `handleTriggerLocal()` bound to `server.on("/trigger", handleTriggerLocal);` on the scale's ESP8266 embedded web server. When a measurement is initiated locally or via FlapMain API, the hardware blinks its onboard LED to provide instant physical readiness feedback to operators and patients.
+
+#### 14.1.9 Automatic Access Point / Hotspot Fallback Mode
+- **Requirement & Behavior:** If the ESP8266 scale cannot connect to the configured Wi-Fi network (`WIFI_SSID` in `config.h`) within 15 seconds:
+  1. System automatically switches to Access Point mode (`WiFi.mode(WIFI_AP_STA)`).
+  2. Broadcasts a local Wi-Fi Hotspot named `AP_SSID` (default: `"FlapScale-Hotspot"`, password: `"12345678"`).
+  3. Serves the local web dashboard and `/data` API endpoint directly on IP `http://192.168.4.1`.
+  4. Triggers a double-blink LED pattern on `LED_PIN` to indicate active Hotspot status to field operators.
+
+#### 14.1.10 FlapMain Weather Station Pro Integration & Real-Time Monitoring
+- **Firmware & Sensors:** Integrated `hardwarecode/esp8266_weather_station/esp8266_weather_station.ino` supporting 8-way Hall effect direction sensors, interrupt-driven anemometer wind speed (GPIO13), DHT22 temperature & humidity (GPIO0), BMP085 barometric pressure & altitude (I2C SDA/SCL), analog LDR light sensor (A0), and NTP time synchronization.
+- **Backend Schema & Telemetry:** Registered `weather_station_v1` DeviceType schema with direct payload validation for `wind_speed`, `wind_direction`, `temperature`, `humidity`, `pressure`, `altitude`, `light`, `time`, `ap_bssid`, and `rssi`. Device `flap-flap-aws-001-7zhj` auto-provisions upon first connection.
+- **Real-Time Frontend Dashboard:** Added `frontend/src/pages/WeatherMonitor.jsx` accessible via `/weather-monitor`. Features a 360° SVG wind direction compass needle with animated rotation, environmental KPI cards, line chart history, and zero-latency WebSocket stream (`new_weather_reading`).
+
+#### 14.1.11 ESP32-CAM Live Surveillance, Direct Cloud Upload & Video Hub Integration
+- **Firmware Direct Frame Ingestion:** Enhanced `hardwarecode/esp_cam/esp_cam.ino` to capture JPEG frames and POST them directly to `https://main.esainnovation.com/api/v1/devices/camera/upload` (`sendFrameToFlapMain()`). Eliminates local IP subnet dependencies, firewall NAT issues, and port-forwarding requirements.
+- **Backend MJPEG Proxy Engine:** Implemented `POST /v1/devices/camera/upload` (accepting raw JPEG buffers & Base64 payloads up to 25MB) and `GET /v1/devices/:device_id/camera/stream` (producing global HTTP MJPEG stream `multipart/x-mixed-replace`) in `backend/src/routes/devices.js`. Emits zero-latency `new_camera_frame` Socket.io events.
+- **Frontend Camera Hub & Direct Media Upload:** Updated `frontend/src/pages/CameraMonitor.jsx` with cloud proxy stream playback (`/camera/stream`), zero-config Base64 live canvas rendering (`new_camera_frame`), and a **"Upload Video / Image"** drag-and-drop tool for storing `.mp4`, `.webm`, and `.jpg` media directly on FlapMain.
+
+#### 14.1.12 ESP32-CAM Onboard Flash LED Driver Fix & Backend Control API
+- **Microcontroller Driver Fix (`app_httpd.cpp` & `esp_cam.ino`):** Included `#include <Arduino.h>` at top of `app_httpd.cpp` to resolve C++ scope compilation errors (`OUTPUT` / `pinMode`). Mapped `var=flash`, `var=led`, and `var=led_intensity` in `cmd_handler()` to directly drive GPIO 4 (AI-Thinker Flash LED). Updated `sendFrameToFlapMain()` to parse `"flash":1` and `"flash":0` in cloud server POST responses.
+- **Backend Control API (`devices.js`):** Added `POST /api/v1/devices/:device_id/control` endpoint storing `cameraFlashState[device_id]`, dispatching HTTP control requests to local camera IPs if stored, and emitting `camera_control_updated` Socket.io events to sync UI state across all open browser dashboards.
+- **Frontend API Base URL Sanitization (`config.js`):** Fixed duplicate `/api` suffix concatenation in `frontend/src/config.js` when `VITE_API_URL` already includes `/api`, guaranteeing clean REST routes (`/api/v1/auth/login`) and seamless authentication.
 
 ---
 

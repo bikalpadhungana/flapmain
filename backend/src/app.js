@@ -69,7 +69,9 @@ app.use(cors({
   credentials: true
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ limit: '25mb', extended: true }));
+app.use(express.raw({ type: ['image/jpeg', 'image/png', 'application/octet-stream'], limit: '25mb' }));
 
 // Swagger Docs Route
 app.use('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));

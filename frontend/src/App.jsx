@@ -11,6 +11,8 @@ import AlertRules from './pages/AlertRules';
 import SystemMonitor from './pages/SystemMonitor';
 import ScaleMonitor from './pages/ScaleMonitor';
 import SensorFusion from './pages/SensorFusion';
+import WeatherMonitor from './pages/WeatherMonitor';
+import CameraMonitor from './pages/CameraMonitor';
 import './App.css';
 
 // Guard wrapper
@@ -118,6 +120,26 @@ function App() {
             <ProtectedRoute>
               <DashboardLayout>
                 <ScaleMonitor />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/weather-monitor"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <WeatherMonitor />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cameras"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <CameraMonitor />
               </DashboardLayout>
             </ProtectedRoute>
           }

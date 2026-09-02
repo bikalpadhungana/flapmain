@@ -15,6 +15,10 @@
 #define WIFI_SSID          "flap_2.4"
 #define WIFI_PASSWORD      "CLB43A84C2"
 
+// --- Wi-Fi Access Point / Hotspot Fallback (when defined Wi-Fi is unavailable) ---
+#define AP_SSID            "FlapScale-Hotspot"
+#define AP_PASSWORD        "12345678"
+
 // --- FlapMain Local Backend API Connection ---
 #define FLAPMAIN_SERVER    "http://192.168.1.69:5051/api"
 

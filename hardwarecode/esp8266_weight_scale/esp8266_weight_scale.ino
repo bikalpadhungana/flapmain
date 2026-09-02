@@ -25,7 +25,7 @@ const float SENSOR_HEIGHT_CM   = 198.5;   // distance from ultrasonic to standin
 #define LED_PIN         0    // onboard LED (active LOW)
 
 // ===================== TIMING =====================
-const unsigned long MEASURE_INTERVAL     = 600;    // local reading interval (ms)
+const unsigned long MEASURE_INTERVAL     = 300;    // local reading interval (ms)
 const unsigned long SERVER_SEND_INTERVAL = 3000;   // how often to send to server (ms)
 const unsigned long STABILITY_TIME_MS    = 1800;   // must be stable this long before lock
 
@@ -178,11 +178,15 @@ void handleData() {
   if (weightState == MEASURING) stateStr = "MEASURING";
   if (weightState == LOCKED)    stateStr = "LOCKED";
 
+  bool isConnected = (WiFi.status() == WL_CONNECTED);
+
   String json = "{";
   json += "\"weight\":" + String(currentWeightKg, 2) + ",";
   json += "\"height\":" + String(currentHeightCm, 1) + ",";
   json += "\"locked\":" + String(lockedWeightKg, 2) + ",";
-  json += "\"state\":\"" + stateStr + "\"";
+  json += "\"state\":\"" + stateStr + "\",";
+  json += "\"wifi_mode\":\"" + String(isConnected ? "STATION" : "HOTSPOT_AP") + "\",";
+  json += "\"ip\":\"" + (isConnected ? WiFi.localIP().toString() : WiFi.softAPIP().toString()) + "\"";
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -215,24 +219,53 @@ void setup() {
     Serial.println(" FAILED");
   }
 
-  // WiFi Connection
-  Serial.print("WiFi connecting");
+  // WiFi Connection (Attempt defined Wi-Fi first, fallback to Hotspot AP mode if unavailable)
+  Serial.print("Connecting to Wi-Fi '");
+  Serial.print(WIFI_SSID);
+  Serial.print("'");
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
   t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) {
+  bool connected = false;
+  while (millis() - t0 < 15000) {
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      break;
+    }
     delay(400);
     Serial.print(".");
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(LED_PIN, LOW);
-    Serial.println("\nWiFi OK");
-    Serial.print("Local dashboard: http://");
+  if (connected) {
+    digitalWrite(LED_PIN, LOW); // Solid LED ON when connected
+    Serial.println("\n[Wi-Fi] Connected successfully to Station network!");
+    Serial.print("[Wi-Fi] Local dashboard URL: http://");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("\nWiFi FAILED");
+    Serial.println("\n[Wi-Fi] Could not connect to defined Wi-Fi network!");
+    Serial.println("[Wi-Fi] Starting Hotspot (Access Point) Mode...");
+
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+
+    Serial.println("=========================================");
+    Serial.print("  Hotspot AP SSID    : ");
+    Serial.println(AP_SSID);
+    Serial.print("  Hotspot Password   : ");
+    Serial.println(AP_PASSWORD);
+    Serial.print("  Hotspot Dashboard  : http://");
+    Serial.println(WiFi.softAPIP());
+    Serial.println("=========================================");
+
+    // Blink indicator
+    for (int i = 0; i < 8; i++) {
+      digitalWrite(LED_PIN, LOW);
+      delay(70);
+      digitalWrite(LED_PIN, HIGH);
+      delay(70);
+    }
   }
 
   // Web server
