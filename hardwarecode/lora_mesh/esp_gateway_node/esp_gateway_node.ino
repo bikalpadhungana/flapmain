@@ -416,8 +416,20 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
     http.begin(client, url);
   }
 
+  // Derive per-node Device ID so multiple AWS stations have distinct database records:
+  // Node 1: Keep legacy FLAPMAIN_DEVICE_ID ("flap-flap-aws-001-7zhj") for backward compatibility
+  // Node 2, 3, etc.: Format as "flap-flap-aws-00X-node" (auto-provisioned by backend)
+  String nodeDeviceId;
+  if (pkt.originNode <= 1) {
+    nodeDeviceId = String(FLAPMAIN_DEVICE_ID);
+  } else {
+    char idBuf[36];
+    snprintf(idBuf, sizeof(idBuf), "flap-flap-aws-%03d-node", pkt.originNode);
+    nodeDeviceId = String(idBuf);
+  }
+
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Device-Id", FLAPMAIN_DEVICE_ID);
+  http.addHeader("X-Device-Id", nodeDeviceId);
   http.addHeader("X-Device-Key", FLAPMAIN_DEVICE_KEY);
   http.setTimeout(1500);
 
@@ -426,7 +438,7 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   float altitude = (pkt.pressure_pa > 0) ? (44330.0 * (1.0 - pow((float)pkt.pressure_pa / 101325.0, 0.1903))) : 0.0;
 
   String postData = "{";
-  postData += "\"device_id\":\"" + String(FLAPMAIN_DEVICE_ID) + "\",";
+  postData += "\"device_id\":\"" + nodeDeviceId + "\",";
   postData += "\"device_type\":\"" + devType + "\",";
   postData += "\"wind_speed\":" + String(pkt.wind_speed_x10 / 10.0, 1) + ",";
   postData += "\"wind_direction\":\"" + String(getWindDirString(pkt.wind_dir_code)) + "\",";
@@ -448,8 +460,7 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   postData += "\"snr\":" + String(snr, 1);
   postData += "}";
 
-  Serial.print("[Cloud Forward] POST ");
-  Serial.println(url);
+  Serial.printf("[Cloud Forward] Station Node #%d (%s) -> POST %s\n", pkt.originNode, nodeDeviceId.c_str(), url.c_str());
 
   int httpCode = http.POST(postData);
 

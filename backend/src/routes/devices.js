@@ -1328,14 +1328,27 @@ router.post('/outbox/:outboxId/ack', (req, res) => {
 /**
  * @route   GET /v1/devices/telemetry/history
  * @desc    Fetch historical weather & sensor telemetry for graph time ranges (live, 3h, 6h, 12h, 24h, 7d, 30d)
+ *          Supports filtering by origin_node (LoRa mesh station ID) and device_id
  */
 router.get('/telemetry/history', async (req, res) => {
   try {
-    const { range = '3h', device_id } = req.query;
+    const { range = '3h', device_id, origin_node } = req.query;
 
     const filter = {};
-    if (device_id) {
+    if (device_id && device_id !== 'all') {
       filter.device_id = device_id;
+    } else {
+      // If fetching weather telemetry across nodes, ensure we only match weather telemetry records
+      filter.$or = [
+        { device_type: 'weather_station_v1' },
+        { 'payload.wind_speed': { $exists: true } },
+        { 'payload.temperature': { $exists: true } },
+        { 'payload.mesh_origin_node': { $exists: true } }
+      ];
+    }
+
+    if (origin_node && origin_node !== 'all') {
+      filter['payload.mesh_origin_node'] = Number(origin_node);
     }
 
     const now = new Date();
@@ -1388,19 +1401,34 @@ router.get('/telemetry/history', async (req, res) => {
         _id: r._id,
         timestamp: r.timestamp,
         timeLabel,
-        temp: r.payload.temperature !== undefined ? Number(r.payload.temperature) : null,
-        humidity: r.payload.humidity !== undefined ? Number(r.payload.humidity) : null,
-        windSpeed: r.payload.wind_speed !== undefined ? Number(r.payload.wind_speed) : null,
-        mq3Gas: r.payload.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : (r.payload.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : null),
-        mq9Gas: r.payload.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : (r.payload.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : null),
-        pressure: r.payload.pressure !== undefined ? Number(r.payload.pressure) : null,
-        altitude: r.payload.altitude !== undefined ? Number(r.payload.altitude) : (r.payload.pressure ? Number((44330 * (1 - Math.pow(r.payload.pressure / 101325, 0.1903))).toFixed(1)) : null),
-        light: r.payload.light !== undefined ? Number(r.payload.light) : null,
-        batteryMv: r.payload.battery_mv !== undefined ? Number(r.payload.battery_mv) : null,
+        deviceId: r.device_id,
+        originNode: r.payload?.mesh_origin_node !== undefined ? Number(r.payload.mesh_origin_node) : 1,
+        temp: r.payload?.temperature !== undefined ? Number(r.payload.temperature) : null,
+        humidity: r.payload?.humidity !== undefined ? Number(r.payload.humidity) : null,
+        windSpeed: r.payload?.wind_speed !== undefined ? Number(r.payload.wind_speed) : null,
+        mq3Gas: r.payload?.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : (r.payload?.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : null),
+        mq9Gas: r.payload?.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : (r.payload?.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : null),
+        pressure: r.payload?.pressure !== undefined ? Number(r.payload.pressure) : null,
+        altitude: r.payload?.altitude !== undefined ? Number(r.payload.altitude) : (r.payload?.pressure ? Number((44330 * (1 - Math.pow(r.payload.pressure / 101325, 0.1903))).toFixed(1)) : null),
+        light: r.payload?.light !== undefined ? Number(r.payload.light) : null,
+        batteryMv: r.payload?.battery_mv !== undefined ? Number(r.payload.battery_mv) : null,
       };
     });
 
-    res.json({ status: 'success', range, count: formatted.length, readings: formatted });
+    // Extract unique active node IDs discovered in this timeframe
+    const distinctNodes = Array.from(new Set(
+      readings
+        .map(r => r.payload?.mesh_origin_node)
+        .filter(n => n !== undefined && n !== null)
+    )).sort((a, b) => a - b);
+
+    res.json({
+      status: 'success',
+      range,
+      count: formatted.length,
+      activeNodes: distinctNodes.length > 0 ? distinctNodes : [1],
+      readings: formatted
+    });
   } catch (error) {
     console.error('Error fetching telemetry history:', error);
     res.status(500).json({ status: 'error', message: 'Failed to fetch telemetry history' });

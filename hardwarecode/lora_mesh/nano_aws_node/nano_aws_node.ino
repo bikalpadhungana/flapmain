@@ -18,14 +18,20 @@
 #include <Wire.h>
 #include <Adafruit_BMP085.h>
 #include "./lora_mesh_protocol.h"
+
+// =================================================================================
+// NODE IDENTIFICATION — SET THIS FOR EACH PHYSICAL AWS STATION BOARD!
+// Board #1 = 1, Board #2 = 2, Board #3 = 3, etc.
+// Each physical station MUST have a unique node ID to prevent network collisions!
+// =================================================================================
+#ifndef AWS_NODE_ID
+  #define AWS_NODE_ID        1         // 1 = Primary Station, 2 = Station #2, 3 = Station #3, etc.
+#endif
+
 #if __has_include("config.h")
   #include "config.h"
 #endif
 
-// ---- Node Configuration ----
-#ifndef AWS_NODE_ID
-  #define AWS_NODE_ID        0x01      // Unique node ID for this AWS station (1..255)
-#endif
 #ifndef TELEMETRY_INTERVAL
   #define TELEMETRY_INTERVAL 5000      // Telemetry broadcast interval in ms (5 seconds — fast & responsive)
 #endif
@@ -170,7 +176,8 @@ bool sendMeshPacket(uint8_t packetType, uint8_t alertLevel) {
 
   // -- Serial debug BEFORE TX (safe; TX hasn't started yet) --
   Serial.println(F("\n=============================================="));
-  Serial.print(F("📤 [AWS TX] Packet #")); Serial.print(msgId);
+  Serial.print(F("📤 [AWS TX #")); Serial.print(AWS_NODE_ID);
+  Serial.print(F("] Packet Msg ID #")); Serial.print(msgId);
   Serial.print(F("  Size=")); Serial.print((int)sizeof(pkt)); Serial.println(F(" bytes"));
   Serial.print(F(" Temp=")); Serial.print(currentTemp,1); Serial.print(F("°C"));
   Serial.print(F(" Hum=")); Serial.print(currentHumidity,1); Serial.print(F("%"));
@@ -202,7 +209,9 @@ bool sendMeshPacket(uint8_t packetType, uint8_t alertLevel) {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println(F("\n=== FlapMain AWS LoRa Mesh Node v2.1 ==="));
+  Serial.print(F("\n=== FlapMain AWS LoRa Mesh Node v2.1 (Node #"));
+  Serial.print(AWS_NODE_ID);
+  Serial.println(F(") ==="));
 
   // --- Pin Setup ---
   pinMode(NORTH_PIN,      INPUT_PULLUP);
@@ -271,8 +280,14 @@ void setup() {
   randomSeed(analogRead(A1) ^ millis());
   msgSequenceCounter = (uint16_t)random(100, 1000);
 
+  // Stagger initial transmission phase based on Node ID to prevent simultaneous airtime collisions:
+  // Node 1: offset 0ms
+  // Node 2: offset 1200ms
+  // Node 3: offset 2400ms
+  // Node 4: offset 3600ms
+  const unsigned long nodePhaseOffset = ((AWS_NODE_ID - 1) % 4) * 1200UL;
   lastWindCalcTime   = millis();
-  lastTelemetryTime  = millis() - TELEMETRY_INTERVAL; // Trigger on first loop
+  lastTelemetryTime  = millis() - TELEMETRY_INTERVAL + nodePhaseOffset;
 }
 
 // ---- Main Loop ----
@@ -293,9 +308,11 @@ void loop() {
     lastWindCalcTime = now;
   }
 
-  // ── 2. Telemetry Broadcast (every TELEMETRY_INTERVAL) ─────────────────────
-  if (now - lastTelemetryTime >= TELEMETRY_INTERVAL) {
+  // ── 2. Telemetry Broadcast (every TELEMETRY_INTERVAL + anti-collision jitter) ──
+  static unsigned long nextInterval = TELEMETRY_INTERVAL;
+  if (now - lastTelemetryTime >= nextInterval) {
     lastTelemetryTime = now;
+    nextInterval = TELEMETRY_INTERVAL + random(0, 300); // 0..300ms random jitter prevents periodic airtime sync
 
     readAllSensors();       // Read all sensors before TX
     sendMeshPacket(PKT_TYPE_WEATHER, 0);

@@ -2578,6 +2578,30 @@ async function syncData100() {
 - **Database Seeding (`backend/src/scripts/seed_lora_mesh.js`):**
   - Automated provisioning script registering the complete LoRa Mesh fleet (`esp_gateway_node_01`, `nano_aws_01`, `walkie_alpha_101`, `walkie_bravo_102`, `walkie_charlie_103`) with proper `device_type`, `auth_key`, and schema definitions.
 
+#### 14.1.23 Multi-Node AWS Weather Station Mesh Support & Anti-Collision Protocol
+- **Problem Resolution for Multiple AWS Nodes:**
+  - Previously, deploying multiple AWS physical stations resulted in ID collision (`AWS_NODE_ID 0x01` hardcoded), RF airtime collisions (nodes transmitting at identical 5000ms intervals destroyed each other's 56-byte packets), single gateway device ID forwarding (`FLAPMAIN_DEVICE_ID`), and frontend state flickering.
+- **Firmware Enhancements (`nano_aws_node.ino` & `config.h`):**
+  - **Macro Precedence:** Wrapped `AWS_NODE_ID`, `FLAPMAIN_DEVICE_ID`, and `TELEMETRY_INTERVAL` in `#ifndef` guards. Developers configure `AWS_NODE_ID` (1 = Primary, 2 = Station #2, 3 = Station #3, etc.) directly at the top of `nano_aws_node.ino`.
+  - **Anti-Collision Phase Staggering:** Initial TX timer in `setup()` staggers startup by `((AWS_NODE_ID - 1) % 4) * 1200ms`.
+  - **Harmonic Backoff Jitter:** In `loop()`, each broadcast interval applies a random `0..300ms` backoff jitter (`TELEMETRY_INTERVAL + random(0, 300)`) preventing periodic RF airtime synchronization on 433MHz.
+  - **Serial Logging:** Serial Monitor displays Station Node ID on boot and in TX logs (`📤 [AWS TX #2] Packet Msg ID #925`).
+- **ESP Gateway Dynamic Ingestion (`esp_gateway_node.ino`):**
+  - Gateway dynamically maps `pkt.originNode`:
+    - `originNode <= 1`: Legacy `FLAPMAIN_DEVICE_ID` (`flap-flap-aws-001-7zhj`).
+    - `originNode > 1`: Format `flap-flap-aws-00X-node` (e.g. `flap-flap-aws-002-node`).
+  - Sets both `X-Device-Id` HTTP header and `device_id` JSON payload property, auto-provisioning distinct MongoDB records.
+- **Backend History Ingestion (`backend/src/routes/devices.js`):**
+  - `GET /v1/devices/telemetry/history` accepts `origin_node` query parameter.
+  - Returns `originNode` and `deviceId` with each reading.
+  - Returns `activeNodes` (unique discovered node IDs within the timeframe).
+- **Frontend Station Switcher Bar & Matrix (`WeatherMonitor.jsx`):**
+  - Maintains `nodesMap` keyed by `meshOriginNode`.
+  - Interactive Station Switcher Bar allows toggling between **🌐 All Stations Overview** and individual stations (`📡 Station Node #1`, `📡 Station Node #2`, etc.).
+  - Station pills display live online pulse dots, latest temperature, and wind speed.
+  - All Stations View provides a Multi-Station Comparison Matrix with 1-click "Inspect Station" navigation.
+  - Historical analytics graph filters telemetry based on the selected station or displays multi-node streams.
+
 ---
 
 ### 14.2 Future Architecture & Development Protocols

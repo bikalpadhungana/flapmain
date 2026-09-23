@@ -9,11 +9,17 @@
 #define AWS_CONFIG_H
 
 // ---- Hardware Node Identifier ----
-#define AWS_NODE_ID        0x01                          // Unique Node ID on LoRa Mesh (1..255)
-#define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"      // Device ID registered in Main Local Server DB
+#ifndef AWS_NODE_ID
+  #define AWS_NODE_ID        0x01                          // Unique Node ID on LoRa Mesh (1..255)
+#endif
+#ifndef FLAPMAIN_DEVICE_ID
+  #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"      // Device ID registered in Main Local Server DB
+#endif
 
 // ---- Telemetry & Transmission Timing ----
-#define TELEMETRY_INTERVAL 5000                          // Telemetry broadcast interval in ms (5s)
+#ifndef TELEMETRY_INTERVAL
+  #define TELEMETRY_INTERVAL 5000                          // Telemetry broadcast interval in ms (5s)
+#endif
 
 // ---- Sensor Calibration ----
 #define WIND_CALIBRATION_K 2.4                           // km/h per pulse per second
