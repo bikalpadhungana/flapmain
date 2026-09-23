@@ -7,6 +7,7 @@
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
     "seed": "node src/scripts/seed.js",
+    "seed:all": "node src/scripts/seed.js && node src/scripts/seed_weather_station.js && node src/scripts/seed_camera.js && node src/scripts/seed_lora_mesh.js && node src/scripts/add_height_sensor_type.js",
     "verify": "node src/tests/verify.js",
     "test:api": "node src/tests/test_api.js",
     "lint": "eslint ."
