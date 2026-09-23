@@ -72,7 +72,7 @@ const WeatherMonitor = () => {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   
   // Multi-Node Weather Telemetry State: { [nodeId]: nodeTelemetry }
-  const [nodesMap, setNodesMap] = useState({ 1: createInitialNode(1) });
+  const [nodesMap, setNodesMap] = useState({ 1: createInitialNode(1), 2: createInitialNode(2) });
   // Selected Station: '1', '2', '3', etc., or 'all' for multi-station mesh matrix
   const [selectedStation, setSelectedStation] = useState('1');
 

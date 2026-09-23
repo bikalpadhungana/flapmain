@@ -44,7 +44,7 @@
   #define WIFI_PASSWORD   "Your_WiFi_Password"
   #define AP_SSID         "FlapMain-LoRaGateway-AP"
   #define AP_PASSWORD     "12345678"
-  #define FLAPMAIN_SERVER "http://192.168.1.67:5051"
+  #define FLAPMAIN_SERVER "http://192.168.1.249:5003"
   #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"
   #define FLAPMAIN_DEVICE_KEY "flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca"
 #endif

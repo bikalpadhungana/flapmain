@@ -17,8 +17,8 @@
 #define AP_PASSWORD     "12345678"
 
 // ---- FlapMain Main Local Server API Target ----
-// Configure to your machine's local IP address or local server host on port 5051
-#define FLAPMAIN_SERVER    "http://192.168.1.67:5051"   // Main Local Server Target (Port 5051)
+// Configure to your machine's local IP address and port (Backend port: 5003)
+#define FLAPMAIN_SERVER    "http://192.168.1.249:5003"   // Main Local Server Target (Port 5003)
 #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"      // Target Device ID for telemetry ingestion
 #define FLAPMAIN_DEVICE_KEY "flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca"
 

@@ -9,11 +9,22 @@
 #define AWS_CONFIG_H
 
 // ---- Hardware Node Identifier ----
+// Set AWS_NODE_ID to:
+//   1 = Primary Station (Roof Deck)       -> Device ID: flap-flap-aws-001-7zhj
+//   2 = Secondary Station (Perimeter/Field) -> Device ID: flap-flap-aws-002-node
+//   3 = Station #3, etc.
 #ifndef AWS_NODE_ID
   #define AWS_NODE_ID        0x01                          // Unique Node ID on LoRa Mesh (1..255)
 #endif
+
 #ifndef FLAPMAIN_DEVICE_ID
-  #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"      // Device ID registered in Main Local Server DB
+  #if AWS_NODE_ID == 1
+    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"      // Registered in Main Local Server DB
+  #elif AWS_NODE_ID == 2
+    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-002-node"      // Registered in Main Local Server DB
+  #else
+    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-custom"
+  #endif
 #endif
 
 // ---- Telemetry & Transmission Timing ----

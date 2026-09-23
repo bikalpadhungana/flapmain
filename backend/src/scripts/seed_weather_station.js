@@ -67,13 +67,13 @@ const seedWeatherStation = async () => {
         device_id: 'flap-flap-aws-002-node',
         name: 'FlapMain Weather Station Pro #2 (Secondary)',
         location: 'South Perimeter Field',
-        apiKey: 'flap_dev_aws_node_02_key_884192'
+        apiKey: 'flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca'
       },
       {
         device_id: 'flap-aws-002',
         name: 'FlapMain Weather Station Pro #2 (Short ID Alias)',
         location: 'South Perimeter Field',
-        apiKey: 'flap_dev_aws_node_02_key_884192'
+        apiKey: 'flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca'
       }
     ];
 

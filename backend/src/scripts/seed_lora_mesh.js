@@ -123,14 +123,14 @@ const seedLoraMeshDevices = async () => {
         device_type: 'weather_station_v1',
         name: 'AWS Weather Station Node #02 (Secondary - LoRa 433MHz)',
         location: 'South Perimeter Field',
-        apiKey: 'flap_dev_aws_node_02_key_884192',
+        apiKey: 'flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca',
       },
       {
         device_id: 'flap-aws-002',
         device_type: 'weather_station_v1',
         name: 'AWS Weather Station Node #02 (Short ID Alias)',
         location: 'South Perimeter Field',
-        apiKey: 'flap_dev_aws_node_02_key_884192',
+        apiKey: 'flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca',
       },
 
       {

@@ -9,9 +9,9 @@
 #define MESH_MASTER_CONFIG_H
 
 // ---- Main Local Server API Target ----
-// Local server running FlapMain backend on port 5051
-#define FLAPMAIN_LOCAL_SERVER   "http://192.168.1.67:5051"
-#define FLAPMAIN_LOCAL_FALLBACK "http://localhost:5051"
+// Local server running FlapMain backend on port 5003
+#define FLAPMAIN_LOCAL_SERVER   "http://192.168.1.249:5003"
+#define FLAPMAIN_LOCAL_FALLBACK "http://localhost:5003"
 
 // ---- Default Wi-Fi Credentials ----
 #define DEFAULT_WIFI_SSID       "Your_WiFi_SSID"
