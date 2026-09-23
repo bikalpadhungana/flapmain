@@ -1386,9 +1386,11 @@ router.get('/telemetry/history', async (req, res) => {
 
     filter.timestamp = { $gte: startTime };
 
-    const readings = await Reading.find(filter)
-      .sort({ timestamp: 1 })
+    // Fetch latest readings up to limit (newest first, then reverse for chronological graph order)
+    const readingsDesc = await Reading.find(filter)
+      .sort({ timestamp: -1 })
       .limit(1000);
+    const readings = readingsDesc.reverse();
 
     const formatted = readings.map(r => {
       const ts = new Date(r.timestamp);
@@ -1415,18 +1417,17 @@ router.get('/telemetry/history', async (req, res) => {
       };
     });
 
-    // Extract unique active node IDs discovered in this timeframe
-    const distinctNodes = Array.from(new Set(
-      readings
-        .map(r => r.payload?.mesh_origin_node)
-        .filter(n => n !== undefined && n !== null)
+    // Query all distinct active nodes present across the entire time window
+    const distinctRaw = await Reading.distinct('payload.mesh_origin_node', filter);
+    const activeNodes = Array.from(new Set(
+      distinctRaw.filter(n => n !== undefined && n !== null).map(Number)
     )).sort((a, b) => a - b);
 
     res.json({
       status: 'success',
       range,
       count: formatted.length,
-      activeNodes: distinctNodes.length > 0 ? distinctNodes : [1],
+      activeNodes: activeNodes.length > 0 ? activeNodes : [1],
       readings: formatted
     });
   } catch (error) {

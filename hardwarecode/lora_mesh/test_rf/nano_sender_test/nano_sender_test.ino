@@ -54,8 +54,19 @@
 #define LORA_PWR        14        // 14 dBm TX power
 #define LORA_SYNC       0x12      // FlapMain sync word
 
-// ---- Node ID ----
-#define TEST_NODE_ID    0x01      // Same as production AWS_NODE_ID
+// =================================================================================
+// NODE IDENTIFICATION — SET THIS DIFFERENTLY FOR EACH PHYSICAL TEST BOARD!
+// Board #1 = 1, Board #2 = 2, Board #3 = 3, etc.
+// If two boards have the same ID, the gateway will drop one as a duplicate!
+// =================================================================================
+#ifndef TEST_NODE_ID
+  #define TEST_NODE_ID    1         // 1 = Primary, 2 = Station #2, 3 = Station #3, etc.
+#endif
+
+// Set to false (RECOMMENDED): Pure Dedicated AWS Station — only broadcasts weather telemetry,
+// no repeater overhead, zero airtime collision.
+// Set to true : Relays incoming Emergency SOS (1) and Walkie text (4) ONLY (never relays weather packets).
+#define ENABLE_TEST_SOS_RELAY  false
 
 // ---- Anemometer Calibration ----
 const float   CALIBRATION_K  = 2.4;   // km/h per pulse/sec
@@ -135,7 +146,8 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println(F("\n=========================================="));
-  Serial.println(F("  FLAPMAIN AWS LORA TEST — v2.1"));
+  Serial.print(F("  FLAPMAIN AWS LORA TEST — Station Node #"));
+  Serial.println(TEST_NODE_ID);
   Serial.println(F("  (Production-matched pin layout)"));
   Serial.println(F("=========================================="));
 
@@ -202,7 +214,14 @@ void setup() {
   randomSeed(analogRead(A1) ^ millis());
   txCounter        = (uint16_t)random(100, 1000);
   lastWindCalcTime = millis();
-  lastTxTime       = millis() - TX_INTERVAL; // Trigger immediately on first loop
+
+  // Stagger initial transmission phase based on Node ID to prevent simultaneous airtime collisions:
+  // Node 1: offset 0ms
+  // Node 2: offset 1200ms
+  // Node 3: offset 2400ms
+  // Node 4: offset 3600ms
+  const unsigned long nodePhaseOffset = ((TEST_NODE_ID - 1) % 4) * 1200UL;
+  lastTxTime       = millis() - TX_INTERVAL + nodePhaseOffset;
 }
 
 // ---- Main Loop ----
@@ -223,9 +242,11 @@ void loop() {
     lastWindCalcTime = now;
   }
 
-  // ── 2. Transmit Every TX_INTERVAL ────────────────────────────────────────
-  if (now - lastTxTime >= TX_INTERVAL) {
+  // ── 2. Transmit Every TX_INTERVAL + Anti-Collision Jitter ─────────────────
+  static unsigned long nextInterval = TX_INTERVAL;
+  if (now - lastTxTime >= nextInterval) {
     lastTxTime = now;
+    nextInterval = TX_INTERVAL + random(0, 300); // 0..300ms random jitter prevents periodic lockstep collisions
 
     // Read all sensors first
     readSensors();
@@ -237,7 +258,7 @@ void loop() {
 
     pkt.msgIdHi        = (txCounter >> 8) & 0xFF;
     pkt.msgIdLo        = txCounter & 0xFF;
-    pkt.originNode     = TEST_NODE_ID;               // Node #1
+    pkt.originNode     = TEST_NODE_ID;               // Unique station ID
     pkt.targetNode     = 0;                          // 0 = Broadcast to all nodes
     pkt.ttl            = DEFAULT_MAX_TTL;            // 8 hops
     pkt.packetType     = PKT_TYPE_WEATHER;           // 0 = Weather telemetry
@@ -256,8 +277,9 @@ void loop() {
 
     // --- Serial debug ---
     Serial.println(F("\n=========================================="));
-    Serial.print(F("📤 [TX #")); Serial.print(txCounter);
-    Serial.print(F("] Size=")); Serial.print((int)sizeof(pkt));
+    Serial.print(F("📤 [TEST TX #")); Serial.print(TEST_NODE_ID);
+    Serial.print(F("] Packet Msg ID #")); Serial.print(txCounter);
+    Serial.print(F("  Size=")); Serial.print((int)sizeof(pkt));
     Serial.println(F(" bytes"));
     Serial.print(F("  Temp=")); Serial.print(currentTemp, 1);
     Serial.print(F("°C  Hum=")); Serial.print(currentHumidity, 1);
@@ -280,7 +302,8 @@ void loop() {
     int result = LoRa.endPacket(); // Synchronous blocking TX
 
     if (result == 1) {
-      Serial.print(F("✅ [TX OK] Packet #")); Serial.print(txCounter);
+      Serial.print(F("✅ [TX OK #")); Serial.print(TEST_NODE_ID);
+      Serial.print(F("] Packet Msg ID #")); Serial.print(txCounter);
       Serial.println(F(" sent! Watch gateway Serial Monitor for: '[GW RX] 56 bytes'"));
     } else {
       Serial.println(F("❌ [TX FAIL] endPacket()=0 — check SPI wiring!"));
@@ -288,10 +311,13 @@ void loop() {
 
     txCounter++;
 
+#if ENABLE_TEST_SOS_RELAY
     // Re-arm radio for mesh relay listening
     LoRa.receive();
+#endif
   }
 
+#if ENABLE_TEST_SOS_RELAY
   // ── 3. Mesh Relay Listener (forward packets from walkie-talkies) ─────────
   int packetSize = LoRa.parsePacket();
   if (packetSize >= 50 && packetSize <= (int)sizeof(LoRaMeshPacket) + 10) {
@@ -334,6 +360,7 @@ void loop() {
     while (LoRa.available()) LoRa.read(); // Drain noise
     LoRa.receive();
   }
+#endif
 
   delay(10);
 }
