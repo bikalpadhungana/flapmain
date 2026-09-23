@@ -355,19 +355,20 @@ function SensorFusion() {
   const GROUP_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#06b6d4', '#8b5cf6', '#ef4444', '#ec4899', '#14b8a6'];
 
   return (
-    <div style={{ padding: '28px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div style={{ maxWidth: 1400, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
 
       {/* ── Page header ── */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 28, gap: 16, flexWrap: 'wrap' }}>
+      <div className="responsive-page-header">
         <div>
-          <h1 style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--text-main)', margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Link2 size={24} color="#6366f1" /> Sensor Fusion
+          <h1 style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--text-main)', margin: 0, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <Link2 size={24} color="#6366f1" style={{ flexShrink: 0 }} />
+            <span>Sensor Fusion</span>
           </h1>
           <p style={{ color: 'var(--text-muted)', margin: '4px 0 0', fontSize: '0.88rem' }}>
             Group devices together to create intelligent, correlated IoT workstations — from clinic entry stations to automated weather arrays.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button
             onClick={fetchAll}
             className="btn btn-secondary"

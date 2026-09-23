@@ -39,7 +39,7 @@ function Login() {
 
   return (
     <div className="flex items-center justify-center relative" style={{ minHeight: '100vh', background: 'var(--bg-app)' }}>
-      <div className="card shadow-md" style={{ width: '420px', padding: 'var(--space-8)', textAlign: 'center', zIndex: 1, margin: '16px' }}>
+      <div className="card shadow-md" style={{ width: '100%', maxWidth: '420px', padding: 'var(--space-8)', textAlign: 'center', zIndex: 1, margin: '16px' }}>
         <div className="flex flex-col items-center gap-3 mb-8">
           <img src="/flapmainlogo.png" alt="FlapMain Logo" style={{ height: '70px', width: 'auto', objectFit: 'contain' }} />
           <div style={{ textAlign: 'center', width: '100%' }}>

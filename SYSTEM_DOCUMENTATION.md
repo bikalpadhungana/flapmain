@@ -52,6 +52,8 @@ The frontend is structured to provide an intuitive user experience for system ad
   - `SystemLogs.jsx`: Audit trails for user actions and system events.
   - `ApiKeys.jsx`: Management of programmatic access tokens.
   - `SchemaRegistry.jsx`: Definition of device types and expected telemetry schemas.
+  - `WeatherMonitor.jsx`: Real-time Automatic Weather Station Pro telemetry dashboard with 360° SVG wind compass, MQ-9 gas sensor monitor, barometric pressure, calculated altitude, and environmental history charts.
+  - `SosAlert.jsx`: Dedicated Emergency SOS Command Center with audio siren alerts, active emergency status banner, and two-way broadcast/unicast messaging to hardware walkie-talkie nodes.
 - **State Management & Communication:** Utilizes modern React hooks, context, and `socket.io-client` for real-time bi-directional telemetry streaming.
 
 ### 3.3 Backend Architecture (Node.js & Express)
@@ -2452,6 +2454,129 @@ async function syncData100() {
 - **Microcontroller Driver Fix (`app_httpd.cpp` & `esp_cam.ino`):** Included `#include <Arduino.h>` at top of `app_httpd.cpp` to resolve C++ scope compilation errors (`OUTPUT` / `pinMode`). Mapped `var=flash`, `var=led`, and `var=led_intensity` in `cmd_handler()` to directly drive GPIO 4 (AI-Thinker Flash LED). Updated `sendFrameToFlapMain()` to parse `"flash":1` and `"flash":0` in cloud server POST responses.
 - **Backend Control API (`devices.js`):** Added `POST /api/v1/devices/:device_id/control` endpoint storing `cameraFlashState[device_id]`, dispatching HTTP control requests to local camera IPs if stored, and emitting `camera_control_updated` Socket.io events to sync UI state across all open browser dashboards.
 - **Frontend API Base URL Sanitization (`config.js`):** Fixed duplicate `/api` suffix concatenation in `frontend/src/config.js` when `VITE_API_URL` already includes `/api`, guaranteeing clean REST routes (`/api/v1/auth/login`) and seamless authentication.
+
+#### 14.1.13 FlapMain Long-Range LoRa Mesh Topology & Fleet Architecture
+- **Decoupled Flood-Routing Mesh Network:** Operates across 433MHz / 868MHz / 915MHz using Semtech SX1278 transceivers configured with Spreading Factor 10 (SF10), 125kHz bandwidth, 4/5 coding rate, 14dBm TX power, CRC enabled, and custom sync word `0x12`.
+- **Fleet Node Roles:**
+  1. **ESP Gateway Base Station (`esp_gateway_node_01`, Node #0):** Dual-stack ESP8266/ESP32 + SX1278 gateway. Listens for mesh packets, deduplicates, syncs NTP, hosts an embedded HTML dashboard (`/` and `/data`), forwards telemetry and messages to FlapMain Cloud API (`POST /v1/devices/data` & `POST /v1/devices/messages`), and polls cloud outbox (`GET /v1/devices/:id/outbox`) to downlink messages to field nodes.
+  2. **Arduino Nano AWS Station (`nano_aws_01`, Node #1):** Primary environmental sensor station collecting DHT22 temperature & humidity, BMP085/180 barometric pressure & altitude, 8-way Hall wind direction, pulse anemometer wind speed, analog LDR ambient light, analog MQ-9 gas, and battery voltage divider readings.
+  3. **Arduino Nano Hilltop Repeater (`nano_repeater_node`, Node #2):** Dedicated relay station with ring-buffer deduplication, TTL decrementing, and 50–200ms collision avoidance jitter.
+  4. **Arduino Nano Walkie-Talkies (`walkie_alpha_101`, `walkie_bravo_102`, Nodes #101 & #102):** Field communicators with SSD1306 128x64 I2C OLED display, Push-to-Talk (PTT) buttons, and active piezo buzzer alerts.
+  5. **ESP8266 Walkie-Talkie (`walkie_charlie_103`, Node #103):** High-speed 80/160MHz field communicator with integrated mesh routing and local OLED display.
+- **Unified LoRa Protocol Header (`lora_mesh_protocol.h`):** Maintained synchronously across all 6 firmware repositories, providing packed binary structures, deduplication ring buffers, wind direction converters, and node target parsers.
+
+#### 14.1.14 FlapMain 56-Byte LoRa Mesh Binary Protocol (`LoRaMeshPacket`)
+- **Zero-Padding Struct Packing:** Defined with `__attribute__((packed))` guaranteeing identical 56-byte binary alignment across 8-bit AVR (Arduino Nano) and 32-bit Xtensa (ESP8266 / ESP32) architectures without compiler padding bytes.
+- **Binary Layout:**
+  - `msgIdHi` / `msgIdLo` (2 bytes, uint8_t): 16-bit sequence message ID (0..65535).
+  - `originNode` (1 byte, uint8_t): Unique origin node identifier (1..255).
+  - `targetNode` (1 byte, uint8_t): Destination node identifier (`0` = Broadcast to all nodes, `1..255` = Targeted unicast).
+  - `ttl` (1 byte, uint8_t): Time-To-Live hop counter (default: 8 hops; decremented at each relay).
+  - `packetType` (1 byte, uint8_t): `0` = Weather Telemetry, `1` = Emergency SOS, `2` = Heartbeat, `3` = Gateway ACK, `4` = Walkie Text Message.
+  - `temp_x10` (2 bytes, int16_t): Temperature in °C × 10 (e.g. 254 = 25.4 °C).
+  - `hum_x10` (2 bytes, uint16_t): Relative Humidity % × 10 (e.g. 655 = 65.5 %).
+  - `pressure_pa` (4 bytes, uint32_t): Barometric pressure in Pascals (e.g. 101325 Pa).
+  - `wind_speed_x10` (2 bytes, uint16_t): Wind speed in km/h × 10 (e.g. 125 = 12.5 km/h).
+  - `wind_dir_code` (1 byte, uint8_t): 8-way compass direction code (1=N, 2=NE, 3=E, 4=SE, 5=S, 6=SW, 7=W, 8=NW).
+  - `light_val` (2 bytes, uint16_t): Ambient light LDR ADC (0..1023).
+  - `battery_mv` (2 bytes, uint16_t): Battery voltage in millivolts (e.g. 3850 mV).
+  - `mq3_gas` (2 bytes, uint16_t): MQ-9 Gas Sensor raw ADC (0..1023) [legacy struct key name preserved for binary compatibility].
+  - `alert_level` (1 byte, uint8_t): `0` = Normal, `1` = Warning, `2` = Critical Emergency SOS.
+  - `text_msg[32]` (32 bytes, char array): Null-terminated ASCII text message payload.
+  - **Total Binary Size:** Exactly 56 bytes.
+- **Permissive Packet Acceptance Window:** Gateway and repeater nodes enforce `packetSize >= 50 && packetSize <= sizeof(LoRaMeshPacket) + 10` before zero-initializing buffer memory (`memset`) to prevent buffer overruns and accept minor radio preamble shifts.
+
+#### 14.1.15 Targeted Node Addressing & Direct Unicast Routing (`/{target_node}`)
+- **Addressing Syntax:** Text messages support inline routing syntax:
+  - `Hello team`: No slash specified → `targetNode = 0` (Broadcast to all nodes in the mesh).
+  - `Medical assist needed /101` or `/102 Report status`: Trailing or leading slash extracted by `parseTargetNodeFromText()` → `targetNode = 101` or `102`.
+- **Node Filtering Rules:**
+  - Walkie-talkie nodes only display text on OLED and trigger buzzer alert tones if `pkt.targetNode == 0` (Broadcast) OR `pkt.targetNode == MY_NODE_ID`.
+  - Targeted messages meant for a different node are passed through silently and relayed over the mesh network if `ttl > 1`.
+- **Web UI & Cloud Integration:**
+  - `SosAlert.jsx` and `WeatherMonitor.jsx` communicator consoles provide a **Target Node Selector** dropdown (`📢 Broadcast (All Nodes)`, `Node #101 Alpha`, `Node #102 Bravo`, `Node #103 Charlie`).
+  - Chat logs render target badges (`📢 Broadcast` vs `🎯 To Node #102`).
+
+#### 14.1.16 Two-Way Cloud Message Bridging & Downlink Outbox Architecture
+- **Downlink Flow (Web UI → Hardware Walkie-Talkies):**
+  1. Operator submits a chat or emergency SOS message from `SosAlert.jsx` or `WeatherMonitor.jsx`.
+  2. Backend endpoint `POST /v1/devices/send-message` enqueues the message into in-memory/database `meshOutboxQueue`.
+  3. ESP Gateway polls `GET /v1/devices/esp_gateway_node_01/outbox` every 5 seconds.
+  4. If an outbox entry exists, the gateway converts it to a binary `LoRaMeshPacket` (`PKT_TYPE_TEXT` or `PKT_TYPE_SOS`, `targetNode`, `text_msg`) and transmits it over 433MHz LoRa.
+  5. Upon successful transmission, the gateway calls `POST /v1/devices/outbox/:outboxId/ack` to acknowledge and purge the entry.
+- **Uplink Flow (Hardware Walkie-Talkies → Cloud UI):**
+  1. Field operator sends a message from a physical walkie-talkie.
+  2. The packet travels across the mesh network to the ESP Gateway.
+  3. Gateway detects `PKT_TYPE_TEXT` or `PKT_TYPE_SOS` and immediately forwards it via `POST /v1/devices/messages` with JSON payload `{ device_id, sender_node, target_node, text, alert_level, rssi, snr }`.
+  4. Backend ingests the message, saves it in MongoDB, and emits real-time `new_mesh_message` Socket.io events to all active browser dashboards.
+
+#### 14.1.17 32-Bit Ring Buffer Deduplication (`MeshDedup`)
+- **Limitation of 16-Bit Packing:** Legacy deduplication combined `(originNode << 8) | (msgId & 0xFF)`. Masking `msgId` with `0xFF` caused sequence IDs greater than 255 to alias (`921 % 256 = 153`), causing false duplicate rejections on sequential packet numbers.
+- **Upgraded 32-Bit Key Architecture:**
+  ```cpp
+  class MeshDedup {
+  private:
+    uint32_t seenIds[SEEN_CACHE_SIZE];
+    uint8_t  seenIdx;
+  public:
+    MeshDedup() : seenIdx(0) {
+      for (uint8_t i = 0; i < SEEN_CACHE_SIZE; i++) seenIds[i] = 0xFFFFFFFF;
+    }
+    bool alreadySeen(uint8_t originNode, uint16_t msgId) {
+      uint32_t key = ((uint32_t)originNode << 16) | (uint32_t)msgId;
+      for (uint8_t i = 0; i < SEEN_CACHE_SIZE; i++) {
+        if (seenIds[i] == key) return true;
+      }
+      return false;
+    }
+    void markSeen(uint8_t originNode, uint16_t msgId) {
+      uint32_t key = ((uint32_t)originNode << 16) | (uint32_t)msgId;
+      seenIds[seenIdx] = key;
+      seenIdx = (seenIdx + 1) % SEEN_CACHE_SIZE;
+    }
+  };
+  ```
+- **Guaranteed Uniqueness:** Preserves the complete 16-bit sequence ID (1..65,535) and 8-bit origin node across all 6 firmware repositories with zero aliasing.
+
+#### 14.1.18 MQ-9 Gas Sensor Integration (Carbon Monoxide & Flammable Gas)
+- **Hardware Sensing:** Arduino Nano AWS station connects an analog MQ-9 sensor to pin `A2`, detecting Carbon Monoxide (CO), Methane, Propane, and combustible gases.
+- **Software Mapping & Compatibility:**
+  - Struct field `mq3_gas` in `LoRaMeshPacket` carries the 10-bit ADC MQ-9 value to maintain binary backward compatibility across existing nodes.
+  - Backend `devices.js` outputs both `mq9_gas` and `mq3_gas` fields in telemetry and history API responses.
+  - `WeatherMonitor.jsx` renders **🔥 MQ-9 Gas Sensor — CO & Flammable Gas (Pin A2)** with dynamic badge thresholds:
+    - `< 300 ADC`: `Clean Air / Normal` (Emerald)
+    - `300–599 ADC`: `Moderate Gas` (Amber)
+    - `≥ 600 ADC`: `HIGH GAS ALERT` (Red Alert)
+  - Historical line charts support the dedicated `mq9` filter tab and Recharts line component.
+
+#### 14.1.19 Hardware Pin Conflict Resolution & Barometric Altitude Calculation
+- **ATmega328P Pin Conflict:** On the Arduino Nano, hardware pin `A5` is dedicated to the I2C SCL clock line. Assigning `BATT_PIN = A5` previously caused `analogRead(A5)` to reconfigure the hardware pin mode, corrupting the I2C bus and freezing the CPU during BMP180 sensor reads.
+- **Resolution:** Reassigned `BATT_PIN` to unused analog input `A3`. Pin `A5` is now strictly reserved for I2C SCL.
+- **Altitude Formula Implementation:** Integrated the international barometric formula on both Gateway firmware and Backend API:
+  $$h = 44330 \times \left(1 - \left(\frac{P}{101325}\right)^{0.1903}\right)$$
+  Computes real-time height above sea level in meters ($h$) from pressure in Pascals ($P$), displayed across UI cards, Gateway status, and Serial Monitor logs.
+
+#### 14.1.20 AWS Dedicated Telemetry Sender Mode (`ENABLE_AWS_SOS_RELAY = false`)
+- **Mesh Starvation Resolution:** The AWS station is primarily an environmental monitoring unit. Previously, continuous packet listening and flood-relaying of mesh traffic delayed sensor reads and consumed radio airtime.
+- **Configuration & Behavior:**
+  - Added `#define ENABLE_AWS_SOS_RELAY false` in `nano_aws_node.ino`. By default, the node acts as a **pure dedicated sensor station**, broadcasting clean telemetry every 5 seconds (`TELEMETRY_INTERVAL = 5000`) without repeater overhead.
+  - When relay is enabled (`true`), it **strictly ignores weather telemetry packets (`PKT_TYPE_WEATHER = 0`)** and only relays `PKT_TYPE_SOS` and `PKT_TYPE_TEXT` packets.
+  - Self-relay guard (`if (rxPkt.originNode == AWS_NODE_ID) return;`) prevents echo loops.
+
+#### 14.1.21 ESP Gateway RX Loop Optimization & Standby Lock Prevention
+- **Loop Prioritization:** In `esp_gateway_node.ino`, `LoRa.parsePacket()` executes at the top of `loop()`, ensuring high-frequency radio polling before web server client handling.
+- **Radio Standby Prevention:** Added explicit `LoRa.receive()` re-arm after every packet read to prevent the SX1278 transceiver from stalling in Standby mode.
+- **Non-Blocking Cloud Timeouts:** Reduced HTTP client timeouts from 8000ms to 1500ms across telemetry forward and outbox poll routines, ensuring intermittent network latencies do not drop incoming LoRa packets.
+- **Informative Deduplication Logs:** Gateway Serial Monitor distinguishes accepted packets (`📥 [GATEWAY RECEIVED LORA MESH DATA]`) from mesh relay duplicates (`ℹ️ [GW MESH DEDUP] Packet #... already accepted — mesh relay duplicate dropped (TTL=X, RSSI=Y)`).
+
+#### 14.1.22 Emergency SOS Dashboard (`SosAlert.jsx`) & Mesh Database Seeding
+- **Frontend Emergency Console (`frontend/src/pages/SosAlert.jsx`):**
+  - Dedicated full-page command center for emergency coordination.
+  - Audio siren synthesizer via Web Audio API when active alerts occur.
+  - Live mesh communicator console with node targeting (`Broadcast`, `#101 Alpha`, `#102 Bravo`, `#103 Charlie`).
+  - High-priority Emergency SOS trigger button broadcasting to all hardware OLED displays and buzzers.
+- **Database Seeding (`backend/src/scripts/seed_lora_mesh.js`):**
+  - Automated provisioning script registering the complete LoRa Mesh fleet (`esp_gateway_node_01`, `nano_aws_01`, `walkie_alpha_101`, `walkie_bravo_102`, `walkie_charlie_103`) with proper `device_type`, `auth_key`, and schema definitions.
 
 ---
 

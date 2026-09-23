@@ -55,11 +55,11 @@ const SystemMonitor = () => {
   return (
     <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
       {/* Header section */}
-      <div className="flex justify-between items-end">
+      <div className="responsive-page-header">
         <div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: '700', color: 'var(--text-main)', margin: '0 0 var(--space-2) 0', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-            <Server size={28} className="text-primary" />
-            System Monitor
+          <h1 style={{ fontSize: '1.75rem', fontWeight: '700', color: 'var(--text-main)', margin: '0 0 var(--space-2) 0', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+            <Server size={28} className="text-primary" style={{ flexShrink: 0 }} />
+            <span>System Monitor</span>
           </h1>
           <p style={{ color: 'var(--text-dim)', margin: 0, fontSize: '0.95rem' }}>
             Live hardware ingestion and VPS forwarding verification
@@ -70,17 +70,17 @@ const SystemMonitor = () => {
           className={`btn ${isPolling ? 'btn-secondary' : 'btn-primary'}`}
           style={{ transition: 'all 0.3s ease' }}
         >
-          {isPolling ? <><RefreshCw size={16} className="spin" /> Live Stream Active</> : <><Radio size={16} /> Live Stream Paused</>}
+          {isPolling ? <><RefreshCw size={16} className="spin" /> Stream Active</> : <><Radio size={16} /> Stream Paused</>}
         </button>
       </div>
 
       {/* Visual Pipeline flow */}
-      <div className="card" style={{ padding: 'var(--space-6)', background: 'linear-gradient(to right, #ffffff, #fafafa)', border: '1px solid var(--border-subtle)', boxShadow: '0 4px 24px -12px rgba(0,0,0,0.08)' }}>
+      <div className="card" style={{ padding: 'var(--space-6)', background: 'linear-gradient(to right, #ffffff, #fafafa)', border: '1px solid var(--border-subtle)', boxShadow: '0 4px 24px -12px rgba(0,0,0,0.08)', overflowX: 'auto' }}>
         <h3 style={{ fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', margin: '0 0 var(--space-5) 0', fontWeight: '600' }}>
           Data Pipeline Architecture
         </h3>
 
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'var(--space-4) 0' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'var(--space-4) 0', minWidth: 480 }}>
 
           {/* Hardware Node */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1 }}>
@@ -122,10 +122,10 @@ const SystemMonitor = () => {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 'var(--space-6)', flex: 1, flexWrap: 'wrap' }}>
+      <div className="responsive-grid-split" style={{ flex: 1 }}>
 
         {/* Left side: Live log stream */}
-        <div style={{ flex: '1 1 500px', display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
           <div className="flex justify-between items-center">
             <h2 style={{ fontSize: '1.25rem', fontWeight: '600', margin: 0, color: 'var(--text-main)' }}>Live Ingestion Stream</h2>
             <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', background: 'var(--bg-app)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--border-subtle)' }}>
@@ -133,7 +133,7 @@ const SystemMonitor = () => {
             </span>
           </div>
 
-          <div className="card" style={{ overflow: 'hidden', padding: 0 }}>
+          <div className="responsive-table-wrapper">
             {loading ? (
               <div style={{ padding: 'var(--space-8)', textAlign: 'center', color: 'var(--text-muted)' }}>Loading Tap Logs...</div>
             ) : logs.length === 0 ? (

@@ -73,6 +73,15 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ limit: '25mb', extended: true }));
 app.use(express.raw({ type: ['image/jpeg', 'image/png', 'application/octet-stream'], limit: '25mb' }));
 
+// Graceful JSON & body parser error handler for device payloads containing control characters
+app.use((err, req, res, next) => {
+  if (err && (err.status === 400 || err.type === 'entity.parse.failed' || err instanceof SyntaxError || err.name === 'SyntaxError' || 'body' in err)) {
+    console.warn(`[INGEST WARNING] Caught malformed payload error from ${req.ip}:`, err.message);
+    return res.status(400).json({ status: 'error', message: 'Malformed JSON or body payload', detail: err.message });
+  }
+  next(err);
+});
+
 // Swagger Docs Route
 app.use('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 

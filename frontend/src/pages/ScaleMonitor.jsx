@@ -168,11 +168,11 @@ const ScaleMonitor = () => {
     <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
 
       {/* Header */}
-      <div className="flex justify-between items-end">
+      <div className="responsive-page-header">
         <div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: '700', color: 'var(--text-main)', margin: '0 0 var(--space-2) 0', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-            <Activity size={28} className="text-primary" />
-            Medical Scale Monitor
+          <h1 style={{ fontSize: '1.75rem', fontWeight: '700', color: 'var(--text-main)', margin: '0 0 var(--space-2) 0', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+            <Activity size={28} className="text-primary" style={{ flexShrink: 0 }} />
+            <span>Medical Scale Monitor</span>
           </h1>
           <p style={{ color: 'var(--text-dim)', margin: 0, fontSize: '0.95rem' }}>
             {isCombinedDevice
@@ -186,7 +186,7 @@ const ScaleMonitor = () => {
           className={`btn ${isPolling ? 'btn-secondary' : 'btn-primary'}`}
           style={{ transition: 'all 0.3s ease' }}
         >
-          {isPolling ? <><RefreshCw size={16} className="spin" /> Live Stream Active</> : <><Radio size={16} /> Live Stream Paused</>}
+          {isPolling ? <><RefreshCw size={16} className="spin" /> Stream Active</> : <><Radio size={16} /> Stream Paused</>}
         </button>
       </div>
 

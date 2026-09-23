@@ -118,11 +118,11 @@ function SystemLogs() {
   return (
     <div className="flex flex-col gap-6 flex-1 h-full">
       {/* Header & Controls */}
-      <div className="flex justify-between items-center flex-wrap gap-4">
+      <div className="responsive-page-header">
         <div>
-          <h1 className="text-main flex items-center gap-2 m-0" style={{ fontSize: '1.5rem', fontWeight: 600, letterSpacing: '-0.02em' }}>
-            <Terminal className="text-primary" size={24} />
-            System Activity & Terminal Logs
+          <h1 className="text-main flex items-center gap-2 m-0" style={{ fontSize: '1.5rem', fontWeight: 600, letterSpacing: '-0.02em', flexWrap: 'wrap' }}>
+            <Terminal className="text-primary" size={24} style={{ flexShrink: 0 }} />
+            <span>System Activity & Terminal Logs</span>
           </h1>
           <p className="text-muted text-sm mt-1 m-0">
             Real-time event stream across all devices, RFID card taps, telemetry feeds & schemas
@@ -250,7 +250,7 @@ function SystemLogs() {
           <div ref={terminalEndRef} />
         </div>
       ) : (
-        <div className="card" style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '650px' }}>
+        <div className="responsive-table-wrapper" style={{ overflowY: 'auto', maxHeight: '650px' }}>
           {logs.length === 0 ? (
             <div className="text-center p-12 text-muted">
               No system log events available.

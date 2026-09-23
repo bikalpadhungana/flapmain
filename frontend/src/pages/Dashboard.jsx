@@ -158,7 +158,7 @@ function Dashboard() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24, flex: 1 }}>
 
       {/* Page header */}
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+      <div className="responsive-page-header">
         <div>
           <h1 style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--text-main)', margin: 0, letterSpacing: '-0.02em' }}>
             Fleet Overview
@@ -177,7 +177,7 @@ function Dashboard() {
       </div>
 
       {/* Hero stat cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 14 }}>
+      <div className="responsive-grid-stats">
         <StatCard icon={Cpu} label="Total Devices" value={devices.length} color="#6366f1" loading={loading} />
         <StatCard icon={Wifi} label="Online Now" value={onlineDevices.length}
           sub={devices.length > 0 ? `${Math.round(onlineDevices.length / devices.length * 100)}% uptime` : ''}
@@ -190,7 +190,7 @@ function Dashboard() {
       </div>
 
       {/* Live event feed + quick links */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
+      <div className="responsive-grid-split">
         <div style={{ background: 'var(--surface)', borderRadius: 14, border: '1px solid var(--border)', padding: '16px 18px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <div style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--text-main)' }}>Live Event Stream</div>

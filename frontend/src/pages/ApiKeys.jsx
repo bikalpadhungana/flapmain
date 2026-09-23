@@ -130,9 +130,9 @@ function ApiKeys() {
 
   return (
     <div className="flex flex-col gap-6 flex-1 h-full relative animate-slide-up">
-      <header className="flex justify-between items-center">
+      <header className="responsive-page-header">
         <div>
-          <h1 className="text-main" style={{ fontSize: '1.75rem', fontWeight: 600, letterSpacing: '-0.02em' }}>Partner API Keys</h1>
+          <h1 className="text-main" style={{ fontSize: '1.75rem', fontWeight: 600, letterSpacing: '-0.02em', margin: 0 }}>Partner API Keys</h1>
           <p className="text-muted text-sm mt-1">Manage scoped authorization credentials for third-party system integrations.</p>
         </div>
         <button onClick={() => setIsModalOpen(true)} className="btn btn-primary" style={{ boxShadow: '0 4px 12px rgba(99, 91, 255, 0.3)' }}>
@@ -148,7 +148,7 @@ function ApiKeys() {
             No API Keys generated yet. Create one to allow external systems to securely connect.
           </div>
         ) : (
-          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: 'var(--space-4)' }}>
+          <div className="responsive-grid-cards">
             {keys.map((k) => (
               <div key={k._id} className="premium-card card-body flex flex-col justify-between gap-4">
                 <div className="flex justify-between items-start">

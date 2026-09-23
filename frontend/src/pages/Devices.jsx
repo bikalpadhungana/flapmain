@@ -351,12 +351,12 @@ function Devices() {
 
   return (
     <div className="flex flex-col gap-6 flex-1 h-full relative">
-      <header className="flex justify-between items-center">
+      <header className="responsive-page-header">
         <div>
           <h1 className="text-main" style={{ fontSize: '1.75rem', fontWeight: 600, letterSpacing: '-0.02em' }}>Hardware & Devices</h1>
           <p className="text-muted text-sm mt-1">Manage physical devices and define hardware types (schemas).</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-3" style={{ flexWrap: 'wrap' }}>
           {(activeTab === 'active' || activeTab === 'physical') ? (
             <button onClick={() => openDeviceModal()} className="btn btn-primary">
               <Plus size={16} /> Add Physical Device
@@ -372,22 +372,22 @@ function Devices() {
       </header>
 
       {/* TABS */}
-      <div className="flex gap-4 border-b border-subtle">
+      <div className="flex gap-2 border-b border-subtle" style={{ overflowX: 'auto', paddingBottom: 4, WebkitOverflowScrolling: 'touch' }}>
         <button
           onClick={() => setActiveTab('active')}
-          style={{ padding: '0.5rem 1rem', borderBottom: activeTab === 'active' ? '2px solid var(--action-primary)' : '2px solid transparent', fontWeight: activeTab === 'active' ? 600 : 500, color: activeTab === 'active' ? 'var(--action-primary)' : 'var(--text-muted)', background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+          style={{ padding: '0.5rem 0.75rem', whiteSpace: 'nowrap', borderBottom: activeTab === 'active' ? '2px solid var(--action-primary)' : '2px solid transparent', fontWeight: activeTab === 'active' ? 600 : 500, color: activeTab === 'active' ? 'var(--action-primary)' : 'var(--text-muted)', background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
         >
           <Activity size={16} /> Active Devices
         </button>
         <button
           onClick={() => setActiveTab('physical')}
-          style={{ padding: '0.5rem 1rem', borderBottom: activeTab === 'physical' ? '2px solid var(--action-primary)' : '2px solid transparent', fontWeight: activeTab === 'physical' ? 600 : 500, color: activeTab === 'physical' ? 'var(--action-primary)' : 'var(--text-muted)', background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+          style={{ padding: '0.5rem 0.75rem', whiteSpace: 'nowrap', borderBottom: activeTab === 'physical' ? '2px solid var(--action-primary)' : '2px solid transparent', fontWeight: activeTab === 'physical' ? 600 : 500, color: activeTab === 'physical' ? 'var(--action-primary)' : 'var(--text-muted)', background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
         >
           <Box size={16} /> All Physical Devices
         </button>
         <button
           onClick={() => setActiveTab('schemas')}
-          style={{ padding: '0.5rem 1rem', borderBottom: activeTab === 'schemas' ? '2px solid var(--action-primary)' : '2px solid transparent', fontWeight: activeTab === 'schemas' ? 600 : 500, color: activeTab === 'schemas' ? 'var(--action-primary)' : 'var(--text-muted)', background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+          style={{ padding: '0.5rem 0.75rem', whiteSpace: 'nowrap', borderBottom: activeTab === 'schemas' ? '2px solid var(--action-primary)' : '2px solid transparent', fontWeight: activeTab === 'schemas' ? 600 : 500, color: activeTab === 'schemas' ? 'var(--action-primary)' : 'var(--text-muted)', background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
         >
           <Cpu size={16} /> Hardware Types (Schemas)
         </button>
@@ -410,7 +410,7 @@ function Devices() {
                   {activeTab === 'active' ? 'No active devices connected right now.' : 'No devices found. Register a physical device to see it here.'}
                 </div>
               ) : (
-                <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--space-4)' }}>
+                <div className="responsive-grid-cards">
                   {devicesToRender.map((device) => (
                     <div key={device.device_id} className={`card ${device.activation_status === 'pending' ? 'card-pending' : 'card-hover'}`} style={{ cursor: 'pointer', border: device.activation_status === 'pending' ? '1px dashed var(--status-warning)' : undefined }} onClick={() => navigate(`/device/${device.device_id}`)}>
                       <div className="card-body flex flex-col gap-4 h-full">

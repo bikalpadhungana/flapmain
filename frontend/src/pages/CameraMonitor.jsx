@@ -219,18 +219,18 @@ const CameraMonitor = () => {
     <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
 
       {/* Page Header */}
-      <div className="flex justify-between items-end" style={{ flexWrap: 'wrap', gap: 12 }}>
+      <div className="responsive-page-header">
         <div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-main)', margin: '0 0 var(--space-2) 0', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-            <Video size={30} style={{ color: '#38bdf8' }} />
-            ESP32-CAM Live Surveillance & Video Stream Hub
+          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-main)', margin: '0 0 var(--space-2) 0', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+            <Video size={30} style={{ color: '#38bdf8', flexShrink: 0 }} />
+            <span>ESP32-CAM Live Surveillance</span>
           </h1>
           <p style={{ color: 'var(--text-dim)', margin: 0, fontSize: '0.95rem' }}>
-            Direct Microcontroller Frame Ingestion • Cloud Proxy Stream • Media File Storage
+            Direct Microcontroller Ingestion • Cloud Proxy Stream • Media Files
           </p>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <input
             type="file"
             ref={fileInputRef}
@@ -245,7 +245,7 @@ const CameraMonitor = () => {
             className="btn btn-secondary"
             style={{ display: 'flex', alignItems: 'center', gap: 8 }}
           >
-            <Upload size={16} /> Upload Video / Image
+            <Upload size={16} /> Upload Media
           </button>
 
           <button
@@ -253,13 +253,13 @@ const CameraMonitor = () => {
             className="btn btn-primary"
             style={{ display: 'flex', alignItems: 'center', gap: 8 }}
           >
-            <Plus size={16} /> Add Camera Feed
+            <Plus size={16} /> Add Feed
           </button>
         </div>
       </div>
 
       {/* Live Video Feeds Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(480px, 1fr))', gap: 'var(--space-6)' }}>
+      <div className="responsive-grid-cards">
         {cameras.map(cam => {
           const liveBase64 = liveFrameMap[cam.id];
           const activeStreamUrl = cam.useCloudStream ? cam.cloudStreamUrl : cam.localStreamUrl;

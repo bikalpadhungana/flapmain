@@ -31,6 +31,7 @@ const seedWeatherStation = async () => {
           pressure: { type: 'number', unit: 'Pa' },
           altitude: { type: 'number', unit: 'm' },
           light: { type: 'number', unit: 'lux' },
+          mq3_gas: { type: 'number', unit: 'ADC' },
           time: { type: 'string', unit: 'time' },
           ap_bssid: { type: 'string', unit: 'bssid' },
           rssi: { type: 'number', unit: 'dBm' }

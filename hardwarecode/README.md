@@ -1,89 +1,75 @@
 # FlapMain Hardware Code Repository (.ino)
 
-This directory contains production-ready Arduino C++ sketches for all hardware devices in the FlapMain IoT ecosystem.
+This directory contains production-ready Arduino C++ sketches for all hardware devices in the FlapMain IoT ecosystem, including Wi-Fi telemetry nodes, ESP32-CAM surveillance nodes, and the long-range **LoRa Mesh Network Architecture**.
 
 ---
 
 ## 📁 Repository Files
 
-| File | Hardware / Sensor | Telemetry Payload Fields |
+| Directory / File | Target Hardware | Description / Telemetry Payload |
 |---|---|---|
-| [`config.h.example`](./config.h.example) | Configuration Header Template | SSID, Password, Server Host, Device ID, API Key |
-| [`esp8266_ultrasonic_sensor.ino`](./esp8266_ultrasonic_sensor.ino) | ESP8266 + HC-SR04 Ultrasonic Distance Sensor | `distance_cm`, `water_level_percent` |
-| [`esp8266_water_tank.ino`](./esp8266_water_tank.ino) | ESP8266 + DS18B20 Temp Sensor & 5V Relay | `temperature_c`, `actuator_state` |
-| [`esp8266_weight_scale.ino`](./esp8266_weight_scale.ino) | ESP8266 + HX711 Load Cell & Height Sensor | `weight_kg`, `height_cm` |
-| [`esp8266_flap_switch.ino`](./esp8266_flap_switch.ino) | ESP8266 + Optocoupled Relay Switch | `switch_state` |
+| [`lora_mesh/lora_mesh_protocol.h`](./lora_mesh/lora_mesh_protocol.h) | Shared Header | 19-byte packed LoRa mesh struct, dedup ring buffer, radio settings |
+| [`lora_mesh/nano_aws_node/`](./lora_mesh/nano_aws_node/nano_aws_node.ino) | Arduino Nano + SX1278 | Automatic Weather Station & SOS Node (Wind, DHT22, BMP085, Light, Battery) |
+| [`lora_mesh/nano_repeater_node/`](./lora_mesh/nano_repeater_node/nano_repeater_node.ino) | Arduino Nano + SX1278 | Dedicated Flood-Routing Relay Node (dedup, jitter, TTL decrementing) |
+| [`lora_mesh/esp_gateway_node/`](./lora_mesh/esp_gateway_node/esp_gateway_node.ino) | ESP8266/ESP32 + SX1278 | LoRa Mesh to Wi-Fi/Cloud API Gateway (Local Dashboard & Cloud POST) |
+| [`esp8266_weather_station/`](./esp8266_weather_station/esp8266_weather_station.ino) | ESP8266 | Direct Wi-Fi Weather Station Firmware (Legacy direct station) |
+| [`esp_cam/`](./esp_cam/esp_cam.ino) | ESP32-CAM | Live MJPEG Surveillance, Direct Cloud JPEG Ingestion, Flash LED Driver |
+| [`esp8266_ultrasonic_sensor.ino`](./esp8266_ultrasonic_sensor.ino) | ESP8266 + HC-SR04 | `distance_cm`, `water_level_percent` |
+| [`esp8266_water_tank.ino`](./esp8266_water_tank.ino) | ESP8266 + DS18B20 | `temperature_c`, `actuator_state` |
+| [`esp8266_weight_scale.ino`](./esp8266_weight_scale.ino) | ESP8266 + HX711 | `weight_kg`, `height_cm` |
+| [`esp8266_flap_switch.ino`](./esp8266_flap_switch.ino) | ESP8266 Relay | `switch_state` |
+
+---
+
+## 📡 FlapMain LoRa Mesh Topology
+
+```
+ +---------------------------+         +--------------------------+         +----------------------------+
+ | Arduino Nano AWS Node     |  LoRa   | Arduino Nano Repeater    |  LoRa   | ESP8266 / ESP32 Gateway    |  Wi-Fi/HTTPS
+ | (Sensors + SX1278 LoRa)   |-------->| (SX1278 Relay Node)      |-------->| (SX1278 + Wi-Fi Backhaul) |-------------> FlapMain Cloud API
+ | Origin Node #1            |  SF10   | Flood Routing Relay      |  SF10   | Local Dashboard + NTP      |               (main.esainnovation.com)
+ +---------------------------+         +--------------------------+         +----------------------------+
+```
+
+### Pin Wiring Matrix
+
+#### 1. Arduino Nano AWS Node & Repeater Node Pinout (SX1278 SPI)
+- **SX1278 LoRa Module**:
+  - `NSS / CS` ➔ Arduino Nano `D10`
+  - `RST` ➔ Arduino Nano `D9`
+  - `DIO0` ➔ Arduino Nano `D2` (Hardware Interrupt 0)
+  - `MOSI` ➔ Arduino Nano `D11`
+  - `MISO` ➔ Arduino Nano `D12`
+  - `SCK` ➔ Arduino Nano `D13`
+  - `VCC` ➔ `3.3V` | `GND` ➔ `GND`
+- **AWS Sensors (nano_aws_node.ino)**:
+  - Anemometer Wind Pulse ➔ `D3` (Hardware Interrupt 1)
+  - Hall Sensors (Active LOW): North `D4`, East `D5`, South `D6`, West `D7`
+  - Emergency SOS Trigger Button ➔ `D8` (Active LOW)
+  - DHT22 Temp/Humidity ➔ `A0` (Digital Pin Mode)
+  - LDR Light Sensor ➔ `A1` (Analog)
+  - Battery Voltage Divider ➔ `A2` (Analog 1:1 Divider)
+  - BMP085/180 Pressure ➔ `A4` (SDA), `A5` (SCL)
+
+#### 2. ESP8266 Gateway Node Pinout (SX1278 SPI)
+- `NSS / CS` ➔ ESP8266 `D8` (GPIO 15)
+- `RST` ➔ ESP8266 `D3` (GPIO 0)
+- `DIO0` ➔ ESP8266 `D2` (GPIO 4)
+- `MOSI` ➔ ESP8266 `D7` (GPIO 13)
+- `MISO` ➔ ESP8266 `D6` (GPIO 12)
+- `SCK` ➔ ESP8266 `D5` (GPIO 14)
+- `VCC` ➔ `3.3V` | `GND` ➔ `GND`
 
 ---
 
 ## ⚡ Quick Start & Flash Instructions
 
-### 1. Requirements (Arduino IDE)
-1. Install **Arduino IDE** (v1.8.x or v2.x).
-2. Add ESP8266 Board Manager URL in **Preferences**:
-   ```
-   http://arduino.esp8266.com/stable/package_esp8266com_index.json
-   ```
-3. Install **ESP8266 Board Package** via *Tools ➜ Board ➜ Boards Manager* (search `esp8266`).
-4. Install Required Libraries via *Tools ➜ Manage Libraries*:
-   - `ArduinoJson` (v6.x)
-   - `DallasTemperature` (for DS18B20)
-   - `OneWire`
+### 1. Required Libraries (Arduino IDE)
+1. Install **sandeepmistry/arduino-LoRa** via *Tools ➜ Manage Libraries* (search `LoRa`).
+2. Install **DHT sensor library** and **Adafruit BMP085 Library**.
+3. Install **NTPClient** (for ESP Gateway).
 
----
-
-### 2. Provisioning Device on FlapMain Dashboard
-1. Open the FlapMain Dashboard at `http://localhost:5173/`.
-2. Click **Provision Device** button.
-3. Select your device schema (e.g. `esp8266_ultrasonic_sensor` ➜ `ultrasonic_distance_v1`).
-4. Click **Submit & Generate Code Snippet**.
-5. Copy the generated `config.h` snippet!
-
----
-
-### 3. Flashing Your ESP8266
-
-1. In the same folder as your `.ino` file, create a new file named `config.h`.
-2. Paste the generated snippet from your dashboard:
-   ```cpp
-   #define WIFI_SSID       "Your_WiFi_SSID"
-   #define WIFI_PASSWORD   "Your_WiFi_Password"
-
-   #define FLAPMAIN_SERVER "http://192.168.1.50:5050" // Your local computer IP
-   #define DEVICE_ID       "flap-ultrasonic-a1b2"
-   #define DEVICE_KEY      "flap_dev_b7ec01d69b63a758d660cdf8ce8857ed"
-   #define TELEMETRY_INTERVAL_MS 5000
-   ```
-3. Connect your ESP8266 via USB.
-4. Select **NodeMCU 1.0 (ESP-12E Module)** or **Wemos D1 Mini** in *Tools ➜ Board*.
-5. Select the COM / Serial Port in *Tools ➜ Port*.
-6. Click **Upload**!
-
----
-
-## 📌 HC-SR04 Ultrasonic Sensor Pinout (esp8266_ultrasonic_sensor.ino)
-
-```
-       +------------------+
-       |   HC-SR04        |
-       | VCC  TRIG ECHO GND|
-       +--+----+----+---+--+
-          |    |    |   |
-          |    |    |   +------> ESP8266 GND
-          |    |    +----------> ESP8266 D6 (GPIO 12)
-          |    +---------------> ESP8266 D5 (GPIO 14)
-          +--------------------> ESP8266 5V (VIN / VU)
-```
-
----
-
-## 🔍 Ingestion Verification
-Open your Arduino IDE Serial Monitor (*115200 baud*). You will see live telemetry readings posted directly to your FlapMain dashboard:
-```
---- Sensor Measurement ---
-  Distance: 24.5 cm
-  Water Level: 75.5 %
-[FlapMain HTTP] Posting to: http://192.168.1.50:5050/v1/devices/flap-ultrasonic-a1b2/readings
-[FlapMain HTTP] Response Code: 201
-[FlapMain HTTP] Response Body: {"message":"Telemetry reading logged successfully"...}
-```
+### 2. Flashing the LoRa Mesh Nodes
+1. **Arduino Nano AWS Node**: Open `lora_mesh/nano_aws_node/nano_aws_node.ino`, select `Arduino Nano` (Processor: ATmega328P or Old Bootloader), select Port, and click **Upload**.
+2. **Arduino Nano Repeater Node**: Open `lora_mesh/nano_repeater_node/nano_repeater_node.ino`, select `Arduino Nano`, select Port, and click **Upload**.
+3. **ESP Gateway Node**: Copy `config.h.example` to `config.h` in `lora_mesh/esp_gateway_node/`, edit your Wi-Fi credentials and FlapMain API key, open `esp_gateway_node.ino`, select `NodeMCU 1.0 (ESP-12E Module)` or `ESP32 Dev Module`, and click **Upload**.

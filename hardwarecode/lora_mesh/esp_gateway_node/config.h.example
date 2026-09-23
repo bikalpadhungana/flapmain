@@ -1,0 +1,22 @@
+/*
+ * Configuration header template for FlapMain ESP LoRa Gateway Node
+ * Rename or copy this file to config.h in the same folder as esp_gateway_node.ino
+ */
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// ---- Wi-Fi Station Credentials ----
+#define WIFI_SSID       "Your_WiFi_SSID"
+#define WIFI_PASSWORD   "Your_WiFi_Password"
+
+// ---- Hotspot AP Fallback Credentials ----
+#define AP_SSID         "FlapMain-LoRaGateway-AP"
+#define AP_PASSWORD     "12345678"
+
+// ---- FlapMain Cloud API Configuration ----
+#define FLAPMAIN_SERVER    "https://main.esainnovation.com/api"
+#define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"
+#define FLAPMAIN_DEVICE_KEY "flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca"
+
+#endif // CONFIG_H

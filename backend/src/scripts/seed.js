@@ -100,11 +100,26 @@ const seed = async () => {
           pressure: { type: 'number', unit: 'Pa' },
           altitude: { type: 'number', unit: 'm' },
           light: { type: 'number', unit: 'lux' },
+          mq3_gas: { type: 'number', unit: 'ADC' },
           time: { type: 'string', unit: 'time' },
           ap_bssid: { type: 'string', unit: 'bssid' },
           rssi: { type: 'number', unit: 'dBm' }
         },
         commands: [],
+      },
+      {
+        device_type: 'walkie_talkie_v1',
+        display_name: 'FlapMain LoRa Walkie-Talkie & Emergency SOS Communicator',
+        fields: {
+          text_msg: { type: 'string', unit: 'text' },
+          alert_level: { type: 'number', unit: 'level' },
+          battery_mv: { type: 'number', unit: 'mV' },
+          mesh_origin_node: { type: 'number', unit: 'node_id' },
+          mesh_hops_left: { type: 'number', unit: 'hops' },
+          rssi: { type: 'number', unit: 'dBm' },
+          snr: { type: 'number', unit: 'dB' },
+        },
+        commands: ['broadcast_sos', 'send_text'],
       },
     ];
 

@@ -154,14 +154,14 @@ function AlertRules() {
 
   return (
     <div className="flex flex-col gap-6 flex-1 h-full">
-      <header className="flex justify-between items-center">
+      <header className="responsive-page-header">
         <div>
-          <h1 className="text-main" style={{ fontSize: '1.75rem', fontWeight: 600, letterSpacing: '-0.02em' }}>Alert Settings</h1>
+          <h1 className="text-main" style={{ fontSize: '1.75rem', fontWeight: 600, letterSpacing: '-0.02em', margin: 0 }}>Alert Settings</h1>
           <p className="text-muted text-sm mt-1">Compile real-time threshold conditions and trigger actuator signals or webhooks.</p>
         </div>
       </header>
 
-      <div className="grid" style={{ gridTemplateColumns: '1.2fr 0.8fr', gap: 'var(--space-6)', alignItems: 'start' }}>
+      <div className="responsive-grid-split" style={{ alignItems: 'start' }}>
         {/* Rules listing */}
         <div className="flex flex-col gap-4">
           <h3 style={{ fontSize: '1.125rem' }}>Active Rules ({rules.length})</h3>

@@ -108,6 +108,15 @@ const processTelemetry = async (req, res) => {
     if (payload.pressure !== undefined) validatedPayload.pressure = Number(payload.pressure);
     if (payload.altitude !== undefined) validatedPayload.altitude = Number(payload.altitude);
     if (payload.light !== undefined) validatedPayload.light = Number(payload.light);
+    if (payload.mq3_gas !== undefined) validatedPayload.mq3_gas = Number(payload.mq3_gas);
+    if (payload.mq9_gas !== undefined) validatedPayload.mq9_gas = Number(payload.mq9_gas);
+    if (payload.battery_mv !== undefined) validatedPayload.battery_mv = Number(payload.battery_mv);
+    if (payload.mesh_origin_node !== undefined) validatedPayload.mesh_origin_node = Number(payload.mesh_origin_node);
+    if (payload.target_node !== undefined) validatedPayload.target_node = Number(payload.target_node);
+    if (payload.mesh_hops_left !== undefined) validatedPayload.mesh_hops_left = Number(payload.mesh_hops_left);
+    if (payload.alert_level !== undefined) validatedPayload.alert_level = Number(payload.alert_level);
+    if (payload.text_msg !== undefined) validatedPayload.text_msg = String(payload.text_msg);
+    if (payload.snr !== undefined) validatedPayload.snr = Number(payload.snr);
     if (payload.time !== undefined) validatedPayload.time = String(payload.time);
     if (payload.ap_bssid !== undefined) validatedPayload.ap_bssid = String(payload.ap_bssid);
 
@@ -1161,6 +1170,240 @@ router.get('/logs/system', async (req, res) => {
   } catch (err) {
     console.error('System logs aggregation error:', err);
     res.status(500).json({ status: 'error', message: 'Failed to aggregate system logs' });
+  }
+});
+
+// ---- LORA MESH TWO-WAY WALKIE-TALKIE & OUTBOX QUEUE ENDPOINTS ----
+let meshOutboxQueue = [];
+let meshMessageHistory = [];
+
+/**
+ * @route   POST /v1/devices/messages
+ * @desc    Uplink endpoint for ESP Gateway to post text/SOS messages from LoRa Mesh walkie-talkies
+ */
+router.post('/messages', async (req, res) => {
+  try {
+    const { gateway_id, origin_node, target_node, message_type, text, alert_level, battery_mv, hops_left, rssi, snr } = req.body;
+    
+    console.log(`[LORA MESH UPLINK MESSAGE]: Node #${origin_node} -> Target #${target_node || 0} (${message_type}): "${text}" (Alert: ${alert_level}, RSSI: ${rssi}dBm)`);
+
+    const msgData = {
+      _id: new Date().getTime().toString() + Math.random().toString().substring(2, 6),
+      gateway_id: gateway_id || 'esp_gateway_node_01',
+      device_id: `flap-walkie-${String(origin_node).padStart(3, '0')}`,
+      origin_node: Number(origin_node) || 0,
+      target_node: Number(target_node) || 0,
+      message_type: message_type || 'text',
+      text: String(text || ''),
+      alert_level: Number(alert_level) || 0,
+      battery_mv: Number(battery_mv) || 0,
+      hops_left: Number(hops_left) || 0,
+      rssi: Number(rssi) || 0,
+      snr: Number(snr) || 0,
+      timestamp: new Date().toISOString()
+    };
+
+    meshMessageHistory.push(msgData);
+    if (meshMessageHistory.length > 100) meshMessageHistory.shift();
+
+    // Broadcast real-time Socket.io events
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('new_mesh_message', msgData);
+      io.emit('new_telemetry', {
+        device_id: msgData.device_id,
+        device_type: 'walkie_talkie_v1',
+        timestamp: msgData.timestamp,
+        payload: {
+          text_msg: msgData.text,
+          mesh_origin_node: msgData.origin_node,
+          alert_level: msgData.alert_level,
+          battery_mv: msgData.battery_mv,
+          mesh_hops_left: msgData.hops_left,
+          rssi: msgData.rssi,
+          snr: msgData.snr
+        }
+      });
+    }
+
+    res.json({ status: 'success', message: 'Uplink message ingested', msg_id: msgData._id });
+  } catch (err) {
+    console.error('Error ingesting uplink mesh message:', err);
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
+ * @route   POST /v1/devices/send-message
+ * @desc    Send a message from FlapMain Cloud web app down to LoRa Mesh walkie-talkie devices
+ */
+router.post('/send-message', async (req, res) => {
+  try {
+    const { target_node, text, alert_level, gateway_id } = req.body;
+    if (!text || String(text).trim().length === 0) {
+      return res.status(400).json({ status: 'error', message: 'Text message cannot be empty' });
+    }
+
+    const outboxItem = {
+      outbox_id: 'out_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+      gateway_id: gateway_id || 'esp_gateway_node_01',
+      target_node: Number(target_node) || 0,
+      text: String(text).trim().substring(0, 31),
+      alert_level: Number(alert_level) || 0,
+      delivered: false,
+      createdAt: new Date().toISOString()
+    };
+
+    meshOutboxQueue.push(outboxItem);
+    console.log(`[LORA MESH DOWNLINK QUEUED]: ID ${outboxItem.outbox_id} for Target #${outboxItem.target_node}: "${outboxItem.text}"`);
+
+    const msgData = {
+      _id: outboxItem.outbox_id,
+      gateway_id: outboxItem.gateway_id,
+      device_id: 'Cloud Base Station (Web Dashboard)',
+      origin_node: 0,
+      target_node: outboxItem.target_node,
+      message_type: outboxItem.alert_level > 0 ? 'sos' : 'text',
+      text: outboxItem.text,
+      alert_level: outboxItem.alert_level,
+      is_downlink: true,
+      timestamp: outboxItem.createdAt
+    };
+
+    meshMessageHistory.push(msgData);
+    if (meshMessageHistory.length > 100) meshMessageHistory.shift();
+
+    // Broadcast Socket.io event so web UI displays outgoing chat instantly
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('new_mesh_message', msgData);
+    }
+
+    res.json({ status: 'success', message: 'Message queued for LoRa Mesh transmission', outbox: outboxItem });
+  } catch (err) {
+    console.error('Error queuing downlink message:', err);
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
+ * @route   GET /v1/devices/messages/history
+ * @desc    Fetch recent LoRa Mesh chat/text/SOS message history
+ */
+router.get('/messages/history', (req, res) => {
+  res.json({ status: 'success', messages: meshMessageHistory });
+});
+
+/**
+ * @route   GET /v1/devices/:id/outbox
+ * @desc    Poll pending downlink outbox messages for ESP Gateway
+ */
+router.get('/:id/outbox', (req, res) => {
+  const pending = meshOutboxQueue.find(m => !m.delivered);
+
+  if (pending) {
+    res.json({
+      has_message: true,
+      outbox_id: pending.outbox_id,
+      target_node: pending.target_node,
+      text: pending.text,
+      alert_level: pending.alert_level
+    });
+  } else {
+    res.json({ has_message: false });
+  }
+});
+
+/**
+ * @route   POST /v1/devices/outbox/:outboxId/ack
+ * @desc    Acknowledge that a queued outbox message was transmitted over 433MHz LoRa
+ */
+router.post('/outbox/:outboxId/ack', (req, res) => {
+  const { outboxId } = req.params;
+  meshOutboxQueue = meshOutboxQueue.filter(m => m.outbox_id !== outboxId);
+  console.log(`[LORA MESH DOWNLINK ACKNOWLEDGED]: Message ${outboxId} delivered to mesh.`);
+  res.json({ status: 'success', message: 'Outbox message acknowledged' });
+});
+
+/**
+ * @route   GET /v1/devices/telemetry/history
+ * @desc    Fetch historical weather & sensor telemetry for graph time ranges (live, 3h, 6h, 12h, 24h, 7d, 30d)
+ */
+router.get('/telemetry/history', async (req, res) => {
+  try {
+    const { range = '3h', device_id } = req.query;
+
+    const filter = {};
+    if (device_id) {
+      filter.device_id = device_id;
+    }
+
+    const now = new Date();
+    let startTime = new Date();
+
+    switch (range) {
+      case 'live':
+        startTime = new Date(now.getTime() - 15 * 60 * 1000); // last 15 mins
+        break;
+      case '3h':
+        startTime = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+        break;
+      case '6h':
+        startTime = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+        break;
+      case '12h':
+        startTime = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+        break;
+      case '24h':
+      case '1d':
+        startTime = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        break;
+      case '7d':
+      case '1w':
+      case '7w':
+        startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        break;
+      case '30d':
+      case '1m':
+        startTime = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        break;
+      default:
+        startTime = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    }
+
+    filter.timestamp = { $gte: startTime };
+
+    const readings = await Reading.find(filter)
+      .sort({ timestamp: 1 })
+      .limit(1000);
+
+    const formatted = readings.map(r => {
+      const ts = new Date(r.timestamp);
+      const isLongRange = range === '7d' || range === '1w' || range === '7w' || range === '30d' || range === '1m';
+      const timeLabel = isLongRange
+        ? `${ts.getMonth()+1}/${ts.getDate()} ${ts.getHours().toString().padStart(2,'0')}:${ts.getMinutes().toString().padStart(2,'0')}`
+        : ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: range === 'live' ? '2-digit' : undefined });
+
+      return {
+        _id: r._id,
+        timestamp: r.timestamp,
+        timeLabel,
+        temp: r.payload.temperature !== undefined ? Number(r.payload.temperature) : null,
+        humidity: r.payload.humidity !== undefined ? Number(r.payload.humidity) : null,
+        windSpeed: r.payload.wind_speed !== undefined ? Number(r.payload.wind_speed) : null,
+        mq3Gas: r.payload.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : (r.payload.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : null),
+        mq9Gas: r.payload.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : (r.payload.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : null),
+        pressure: r.payload.pressure !== undefined ? Number(r.payload.pressure) : null,
+        altitude: r.payload.altitude !== undefined ? Number(r.payload.altitude) : (r.payload.pressure ? Number((44330 * (1 - Math.pow(r.payload.pressure / 101325, 0.1903))).toFixed(1)) : null),
+        light: r.payload.light !== undefined ? Number(r.payload.light) : null,
+        batteryMv: r.payload.battery_mv !== undefined ? Number(r.payload.battery_mv) : null,
+      };
+    });
+
+    res.json({ status: 'success', range, count: formatted.length, readings: formatted });
+  } catch (error) {
+    console.error('Error fetching telemetry history:', error);
+    res.status(500).json({ status: 'error', message: 'Failed to fetch telemetry history' });
   }
 });
 

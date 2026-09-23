@@ -12,6 +12,7 @@ import SystemMonitor from './pages/SystemMonitor';
 import ScaleMonitor from './pages/ScaleMonitor';
 import SensorFusion from './pages/SensorFusion';
 import WeatherMonitor from './pages/WeatherMonitor';
+import SosAlert from './pages/SosAlert';
 import CameraMonitor from './pages/CameraMonitor';
 import './App.css';
 
@@ -130,6 +131,16 @@ function App() {
             <ProtectedRoute>
               <DashboardLayout>
                 <WeatherMonitor />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/sos-alert"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <SosAlert />
               </DashboardLayout>
             </ProtectedRoute>
           }

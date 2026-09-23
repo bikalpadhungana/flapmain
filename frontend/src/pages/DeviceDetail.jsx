@@ -185,7 +185,7 @@ function DeviceDetail() {
 
   return (
     <div className="flex flex-col gap-6 flex-1 h-full">
-      <div className="flex justify-between items-center">
+      <div className="responsive-page-header">
         <div className="flex items-center gap-4">
           <button onClick={() => navigate('/')} className="btn btn-secondary btn-icon">
             <ArrowLeft size={18} />
@@ -198,7 +198,7 @@ function DeviceDetail() {
 
         <button onClick={() => setShowConfig(!showConfig)} className="btn btn-secondary btn-sm">
           <Cpu size={14} />
-          <span>{showConfig ? 'Hide Hardware Code' : 'Hardware C++ Code Config'}</span>
+          <span>{showConfig ? 'Hide Hardware Code' : 'Hardware Code Config'}</span>
         </button>
       </div>
 
@@ -233,7 +233,7 @@ function DeviceDetail() {
         </div>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: '2fr 1fr', gap: 'var(--space-6)' }}>
+      <div className="responsive-grid-split">
         {/* Left Column: Line Charts & History Log */}
         <div className="flex flex-col gap-6">
           {/* Dynamic Charts Display */}
