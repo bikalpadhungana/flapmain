@@ -33,7 +33,14 @@ const seedLoraMeshDevices = async () => {
           pressure: { type: 'number', unit: 'Pa' },
           altitude: { type: 'number', unit: 'm' },
           light: { type: 'number', unit: 'lux' },
+          mq9_gas: { type: 'number', unit: 'ADC' },
           mq3_gas: { type: 'number', unit: 'ADC' },
+          battery_mv: { type: 'number', unit: 'mV' },
+          mesh_origin_node: { type: 'number', unit: 'node_id' },
+          target_node: { type: 'number', unit: 'node_id' },
+          mesh_hops_left: { type: 'number', unit: 'hops' },
+          alert_level: { type: 'number', unit: 'level' },
+          snr: { type: 'number', unit: 'dB' },
           time: { type: 'string', unit: 'time' },
           ap_bssid: { type: 'string', unit: 'bssid' },
           rssi: { type: 'number', unit: 'dBm' }
@@ -96,13 +103,36 @@ const seedLoraMeshDevices = async () => {
 
     // 2. Pre-provision hardware devices with hashed API Keys & Node IDs
     const loraDevices = [
+      // ---- Automatic Weather Station (AWS) Mesh Nodes (Node #1 & Node #2) ----
       {
         device_id: 'flap-flap-aws-001-7zhj',
         device_type: 'weather_station_v1',
-        name: 'AWS Weather Station Node #01 (LoRa 433MHz)',
+        name: 'AWS Weather Station Node #01 (Primary - LoRa 433MHz)',
         location: 'Roof Telemetry Deck',
         apiKey: 'flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca',
       },
+      {
+        device_id: 'flap-aws-7zhj',
+        device_type: 'weather_station_v1',
+        name: 'AWS Weather Station Node #01 (Short ID Alias)',
+        location: 'Roof Telemetry Deck',
+        apiKey: 'flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca',
+      },
+      {
+        device_id: 'flap-flap-aws-002-node',
+        device_type: 'weather_station_v1',
+        name: 'AWS Weather Station Node #02 (Secondary - LoRa 433MHz)',
+        location: 'South Perimeter Field',
+        apiKey: 'flap_dev_aws_node_02_key_884192',
+      },
+      {
+        device_id: 'flap-aws-002',
+        device_type: 'weather_station_v1',
+        name: 'AWS Weather Station Node #02 (Short ID Alias)',
+        location: 'South Perimeter Field',
+        apiKey: 'flap_dev_aws_node_02_key_884192',
+      },
+
       {
         device_id: 'esp_gateway_node_01',
         device_type: 'lora_gateway_v1',
