@@ -40,20 +40,22 @@ To systematically identify vulnerabilities, we applied multiple threat modeling 
 
 | Threat | FlapMain Exposure | Mitigation Status |
 | :--- | :--- | :--- |
-| **Spoofing** | High. Devices can spoof API keys due to flawed validation in `/tap`. RFID UIDs are sent plaintext and can be replayed. MQTT topics lack ACLs. | **FAILING** |
-| **Tampering** | High. Hardware flash is unencrypted. Attackers can dump firmware, extract API keys, and tamper with MQTT payloads in transit. | **FAILING** |
-| **Repudiation** | Medium. Lack of cryptographic non-repudiation. A device cannot prove it sent a specific telemetry payload. | **FAILING** |
-| **Information Disclosure**| Critical. Sync workers transmit sensitive `TapLogs` over plaintext HTTP (`http://92.113.147.155:5001/api/device/tap`). WiFi credentials hardcoded in firmware. | **FAILING** |
-| **Denial of Service** | Critical. Native Aedes broker running on the same Node.js thread as the API. MQTT connection flooding will crash the entire backend. | **FAILING** |
-| **Elevation of Privilege**| Medium. API key scopes exist but edge sync endpoints trust client-provided IDs. | **WEAK** |
+| **Spoofing** | Critical. Devices can spoof API keys due to flawed validation in `/tap`. RFID UIDs can be replayed. On the LoRa 433MHz mesh, any RF transceiver can spoof walkie-talkie node IDs (`originNode = 101`) or broadcast rogue Emergency SOS alerts due to complete lack of packet signing or source authentication. | **FAILING** |
+| **Tampering** | Critical. Hardware flash is unencrypted. Attackers can dump firmware and extract secrets. Over-the-air 56-byte LoRa mesh packets are completely unencrypted and unsigned, allowing bit-flipping, text tampering, and alert level modification in flight. | **FAILING** |
+| **Repudiation** | High. Lack of cryptographic non-repudiation across both MQTT and LoRa walkie-talkie mesh networks. Nodes cannot prove the authentic origin or integrity of distress broadcasts. | **FAILING** |
+| **Information Disclosure**| Critical. Sync workers transmit sensitive `TapLogs` over plaintext HTTP (`http://92.113.147.155:5001/api/device/tap`). WiFi credentials hardcoded in firmware. All 433MHz LoRa walkie-talkie text messages, operational communications, and weather telemetry are broadcast unencrypted in cleartext, interceptable with any $25 SDR or Flipper Zero within 3–5 km. | **FAILING** |
+| **Denial of Service** | Critical. Native Aedes broker running on the same Node.js thread as the API. MQTT connection flooding crashes the backend. Malicious LoRa mesh packet flooding (`ttl = 8`) causes broadcast storms, exhausting the 433MHz channel duty cycle and rapidly draining battery on portable walkie nodes (sleep deprivation attack). | **FAILING** |
+| **Elevation of Privilege**| Medium. API key scopes exist but edge sync endpoints trust client-provided IDs. Insecure downlink endpoints (`/v1/devices/send-message`) allow unprivileged web users to broadcast arbitrary panic alerts directly to field personnel. | **WEAK** |
 
-### 2.2 MITRE ATT&CK for ICS (Industrial Control Systems)
+### 2.2 MITRE ATT&CK for ICS & Embedded IoT
 
-* **Initial Access (T0807 - Use of Default Credentials):** Hardcoded `API_KEY` and `WIFI_PASS` in firmware.
-* **Execution (T0871 - Execution through API):** Malicious commands can be injected via unauthenticated MQTT topics.
-* **Persistence (T0861 - Modify Control Logic):** OTA updates (if implemented) currently lack cryptographic signature verification, allowing malicious firmware flashing.
-* **Privilege Escalation (T0890 - Exploitation for Privilege Escalation):** Bypassing API key checks by forging the `device_id` in the JSON payload at the `/tap` endpoint.
-* **Evasion (T0849 - Indicate Malicious Activity):** Lack of centralized audit logging allows attackers to operate silently.
+* **Initial Access (T0807 - Use of Default Credentials):** Hardcoded `API_KEY` and `WIFI_PASS` in firmware; public pre-shared LoRa Sync Word (`0x12`) and static Node IDs.
+* **Execution (T0871 - Execution through API):** Malicious commands injected via unauthenticated MQTT topics and unauthenticated LoRa outbox injection (`/v1/devices/send-message`).
+* **Persistence (T0861 - Modify Control Logic):** Firmware lacks cryptographic signature verification, allowing malicious firmware flashing over UART/ICSP.
+* **Privilege Escalation (T0890 - Exploitation for Privilege Escalation):** Bypassing API key checks by forging `device_id` in `/tap` or forging LoRa `originNode` IDs.
+* **Evasion (T0849 - Indicate Malicious Activity):** Lack of centralized audit logging on mesh communications and RF traffic.
+* **Impair Process Control (T0831 - Manipulation of Control):** Injecting forged LoRa Emergency SOS packets (`alert_level = 2`) to trigger physical sirens on walkie-talkies and activate emergency red alerts across cloud monitoring dashboards.
+* **Inhibit Response Function (T0814 - Denial of Service):** RF flooding and mesh amplification storming to choke the 433MHz band and exhaust field battery reserves.
 
 ---
 
@@ -140,6 +142,26 @@ An attacker with brief physical access can connect a logic analyzer or JTAG debu
 
 #### Remediations
 * **Enterprise-grade Fix:** During the PCB manufacturing process (PCBA), physically fuse the JTAG pins or permanently disable them via eFuses on the ESP32. Ensure the production firmware silences all UART output (`Serial.end()`) to prevent information leakage during boot sequences.
+
+### 3.5 LoRa Mesh Walkie-Talkie & Sensor Node Hardware Vulnerabilities
+
+#### Current Design
+The Flap LoRa Mesh fleet utilizes Arduino Nano (ATmega328P 8-bit AVR, 16MHz, 2KB SRAM, 32KB Flash) and ESP8266 microcontrollers connected to Semtech SX1278 SPI transceivers, SSD1306 128x64 OLED displays, Push-to-Talk (PTT) tactile buttons, and piezo buzzers (`nano_walkie_talkie_node.ino`, `nano_aws_node.ino`).
+
+#### Critical Issues & Attack Scenarios
+* **Lack of Hardware Cryptographic Acceleration:** The ATmega328P has zero cryptographic acceleration (no AES hardware, no SHA engines, no True Random Number Generator - TRNG). Random seeds rely on pseudo-random noise `analogRead(A1) ^ millis()`, making generated message IDs predictable.
+* **Unprotected Flash & Memory Extraction:** The ATmega328P and ESP8266 boards leave standard ICSP programming headers (MISO/MOSI/SCK/RESET) exposed. An attacker with physical access can use an inexpensive USBasp programmer to execute `avrdude -p m328p -U flash:r:dump.hex:i`, dumping the entire program memory. This reveals the mesh network Sync Word (`0x12`), frequency channels, node IDs, and private communication structures.
+* **Per-Device Cryptographic Key Infeasibility on Legacy 8-bit Hardware:** With only 2KB of SRAM shared between stack, heap, display framebuffers (`Adafruit_SSD1306` consumes 1024 bytes—50% of total RAM), and the 56-byte LoRa packet buffers, running asymmetric cryptography (RSA, ECDSA) on the Arduino Nano causes immediate stack collision and crash.
+* **Physical Tampering with Alert Peripherals:** Push-to-Talk and piezo alarm lines lack hardware tamper-detection. An attacker can ground or short the buzzer pin to silently suppress critical emergency SOS dispatches.
+
+#### Risk Assessment
+* **Severity:** High
+* **Business Impact:** Total compromise of physical field communicators, unauthorized mesh eavesdropping, and spoofed field identity.
+* **Probability:** High for field-deployed handheld hardware.
+
+#### Remediations
+* **Low-budget Fix:** Program the AVR lock bits (`LB1` and `LB2` set to Mode 3) during production programming to permanently prevent flash and EEPROM verification readouts via ICSP. Solder tamper-resistant conformal coating or resin over the MCU and ICSP pins.
+* **Enterprise-grade Fix:** Phase out 8-bit ATmega328P for field communicators. Migrate to modern 32-bit hardware (ESP32-S3 or Nordic nRF52840) featuring **Secure Boot**, **Flash Encryption**, and an onboard **ATECC608A Cryptographic Co-processor** to store hardware-rooted private keys securely.
 
 ---
 *Volume 1 Complete. Proceeding to Volume 2: Network & Communications Security.*
@@ -243,6 +265,183 @@ const response = await fetch(mainServerUrl, { method: 'POST', body: JSON.stringi
 * **Enterprise-grade Fix:** Do not expose the internal syncing API to the public internet at all. Establish an IPsec VPN or WireGuard tunnel between the Edge Gateway and the Cloud VPC. Route all sync traffic exclusively through this encrypted, private tunnel. Implement request signing (HMAC-SHA256) using a rotating shared secret so the cloud server can verify the integrity and origin of the sync payload, preventing replay attacks.
 
 ---
+
+## 4. LoRa 433MHz Mesh & Walkie-Talkie Protocol Security Review
+
+FlapMain incorporates an off-grid 433MHz LoRa mesh communications subsystem designed for resilient, long-range field coordination, environmental monitoring, and two-way emergency SOS paging (`lora_mesh_protocol.h`, `nano_walkie_talkie_node.ino`, `esp_gateway_node.ino`). While operationally capable of traversing non-line-of-sight terrain, the protocol design exhibits **zero cryptographic defense**, leaving field personnel and cloud dispatchers vulnerable to critical exploitation.
+
+### 4.1 Architecture of the Flap LoRa Mesh Network
+
+The mesh operates on a broadcast flooding model across Semtech SX1278 transceivers configured with:
+* **Carrier Frequency:** 433.00 MHz ISM Band
+* **Spreading Factor:** SF10 (high sensitivity, long airtime ~280ms per packet)
+* **Signal Bandwidth:** 125 kHz | **Coding Rate:** 4/5
+* **Public Sync Word:** `0x12` (FlapMain Mesh Identifier)
+* **Mesh Packet Structure:** 56-byte packed C struct (`LoRaMeshPacket`):
+  ```cpp
+  struct __attribute__((packed)) LoRaMeshPacket {
+    uint8_t  msgIdHi, msgIdLo; // 16-bit sequence ID
+    uint8_t  originNode;       // Source Node ID (1..255)
+    uint8_t  targetNode;       // Destination (0=Broadcast, 1..255=Unicast)
+    uint8_t  ttl;              // Hop counter (default 8)
+    uint8_t  packetType;       // 0=Weather, 1=SOS, 2=Heartbeat, 4=Text
+    int16_t  temp_x10;         // Temperature
+    uint16_t hum_x10;          // Humidity
+    uint32_t pressure_pa;      // Barometric pressure
+    uint16_t wind_speed_x10;   // Wind speed
+    uint8_t  wind_dir_code;    // Compass heading
+    uint16_t light_val;        // LDR ADC
+    uint16_t battery_mv;       // Battery voltage
+    uint16_t mq3_gas;          // MQ-9 Gas ADC
+    uint8_t  alert_level;      // 0=Normal, 1=Warning, 2=Critical SOS
+    char     text_msg[32];     // 32-byte cleartext ASCII message
+  };
+  ```
+
+---
+
+### 4.2 Plaintext RF Broadcasts & Eavesdropping (Zero Over-the-Air Encryption)
+
+#### Current Design
+Every field transmission—including private walkie-talkie text messages (`text_msg[32]`), operator coordinates, battery states, and emergency alert dispatches—is transmitted across the 433MHz band with **no payload encryption whatsoever**.
+
+#### Critical Issues & Attack Scenarios
+* **Attack Scenario (Passive RF Interception & Eavesdropping):** 433 MHz LoRa signals propagate up to 3–15 km with line of sight. An adversary using an RTL-SDR dongle ($25), a HackRF One, or a handheld Flipper Zero equipped with a CC1101/SX1278 module can tune to 433.00 MHz, configure SF10/125kHz, and passively log all communications without transmitting a single byte.
+* **Business & Safety Impact:** Complete loss of confidentiality. Hostile parties can monitor security patrols, emergency evacuation coordination, clinic staff dispatches, and infrastructure sensor telemetry in real time.
+
+#### Risk Assessment
+* **Severity:** Critical (CVSS 9.1 - Complete Confidentiality Loss)
+* **Probability:** Certain (RF spectrum is inherently open and trivially monitored).
+
+---
+
+### 4.3 Zero Cryptographic Authentication & Rogue SOS Injection (Panic Spoofing)
+
+#### Current Design
+The protocol relies solely on a single unverified byte (`pkt.originNode`) to identify the transmitting station. The packet contains **no digital signature, no HMAC, and no rolling cryptographic token**.
+
+#### Critical Issues & Attack Scenarios
+* **Attack Scenario 1 (Rogue Emergency SOS Injection):** An attacker crafts a 56-byte packet with `packetType = 1` (PKT_TYPE_SOS), `alert_level = 2` (Critical Emergency), and `text_msg = "ACTIVE SHOOTER EVACUATE"`, claiming `originNode = 101` (Walkie Alpha).
+* **Consequences:**
+  1. Every physical walkie-talkie in range executes its emergency interrupt, initiates `tone(BUZZER_PIN, 2000)`, flashes the red warning indicator, and locks the OLED screen into panic mode.
+  2. The ESP Gateway (`esp_gateway_node_01`) intercepts the packet, accepts it as authentic, and fires an HTTP POST to `https://flap.esainnovation.com/v1/devices/messages`.
+  3. The cloud backend emits real-time Socket.io events (`new_mesh_message`), causing browser alarms to sound across hospital and security command centers (`SosAlert.jsx`).
+* **Attack Scenario 2 (Identity Forgery):** An attacker transmits text messages spoofing the supervisor's node (`originNode = 100`), sending fraudulent orders to field units (e.g., "Abandon checkpoint immediately").
+
+#### Risk Assessment
+* **Severity:** Critical (CVSS 9.6 - Unauthenticated Remote Command & Panic Injection)
+* **Business Impact:** Weaponized false alarms, evacuation panic, discrediting emergency systems, and physical diversion of security forces.
+
+---
+
+### 4.4 Replay Attacks & Trivial Deduplication Cache Bypass
+
+#### Current Design
+To prevent infinite routing loops, nodes maintain a volatile in-memory ring buffer (`MeshDedup`):
+```cpp
+class MeshDedup {
+private:
+  uint32_t seenIds[32]; // Capacity: exactly 32 packets
+  uint8_t  seenIdx;
+public:
+  bool alreadySeen(uint8_t originNode, uint16_t msgId) {
+    uint32_t key = ((uint32_t)originNode << 16) | msgId;
+    for (uint8_t i = 0; i < 32; i++) {
+      if (seenIds[i] == key) return true;
+    }
+    return false;
+  }
+};
+```
+
+#### Critical Issues & Attack Scenarios
+* **Attack Scenario (Replay Attack via Cache Overflow):**
+  1. An attacker captures a valid emergency broadcast packet (`originNode = 101`, `msgId = 4500`).
+  2. The legitimate packet is deduplicated for 32 iterations.
+  3. The attacker immediately blasts 32 dummy packets with arbitrary IDs (`originNode = 250`, `msgId = 1..32`). This flushes the genuine packet key out of the 32-entry circular buffer.
+  4. The attacker re-transmits the captured legitimate SOS packet. The gateway and walkie-talkies evaluate `alreadySeen()` as `false` and re-execute the full alert cycle.
+* **Reboot Replay Vulnerability:** When any walkie-talkie or gateway power cycles, the in-memory array is completely wiped. Any recorded packet can be immediately replayed upon boot.
+
+#### Risk Assessment
+* **Severity:** High
+* **Probability:** High (Trivial to execute with any programmable transmitter).
+
+---
+
+### 4.5 Mesh Relay Amplification, Denial of Service, & Sleep Deprivation
+
+#### Current Design
+Repeaters and relaying nodes decrement `ttl` (`if (pkt.ttl > 1) { pkt.ttl--; LoRa.write(...); }`) and re-broadcast packets omnidirectionally.
+
+#### Critical Issues & Attack Scenarios
+* **Broadcast Storm Amplification:** In an area with 5 nodes, a single injected packet with `ttl = 8` can generate up to 40 distinct transmissions due to multi-path relaying. An attacker transmitting 10 packets per second creates an immediate, catastrophic broadcast storm.
+* **RF Denial of Service (Jamming & Duty Cycle Saturation):** At SF10/125kHz, a 56-byte packet requires ~280ms airtime. Continuous transmission completely saturates the 433MHz frequency, suppressing all genuine weather telemetry and emergency calls.
+* **Sleep Deprivation Battery Exhaustion:** Handheld walkie-talkies rely on small rechargeable lithium cells (500–1200mAh). Continuous radio listening and constant relay transmissions draw 30–120mA continuously, depleting batteries within 4–6 hours instead of lasting several days.
+
+#### Risk Assessment
+* **Severity:** High
+* **Business Impact:** Complete failure of off-grid communications during critical natural disasters or power outages.
+
+---
+
+### 4.6 The Targeted Node Privacy Illusion (`/{target_node}`)
+
+#### Current Design
+The system implements unicast text routing via inline string parsing:
+```cpp
+// If message is "Medical assistance needed /102":
+// pkt.targetNode = 102
+if (pkt.targetNode == 0 || pkt.targetNode == MY_NODE_ID) {
+  displayOnOled(pkt.text_msg);
+}
+```
+
+#### Critical Issues
+* The filtering is **strictly cosmetic and client-side**. Because LoRa operates as an unencrypted physical broadcast medium, all packets are demodulated and buffered into memory by every single receiver within radio range.
+* Any unauthorized party or rogue station running custom firmware simply removes the `if (pkt.targetNode == MY_NODE_ID)` check and logs all targeted 1-to-1 conversations.
+
+---
+
+### 4.7 Gateway Cloud Bridge Vulnerabilities
+
+#### Current Design
+The ESP Gateway bridges the LoRa RF mesh with the cloud backend:
+* **Uplink:** `POST /v1/devices/messages` (forwards LoRa text and SOS).
+* **Downlink:** Polls `GET /v1/devices/esp_gateway_node_01/outbox` every 5 seconds, converts pending web messages to LoRa RF packets, and acknowledges via `POST /v1/devices/outbox/:outboxId/ack`.
+
+#### Critical Issues
+1. **Unauthenticated Outbox Polling:** If the gateway's static `X-Device-Key` is sniffed or leaked from firmware, an attacker can poll the cloud outbox directly, intercepting sensitive outbound field directives before the gateway can transmit them.
+2. **Arbitrary Downlink Injection via Web API:** The endpoint `POST /v1/devices/send-message` allows users to inject text and SOS alerts down to the physical LoRa mesh. The backend does not verify that the requester has administrative authority over physical tactical radios, allowing any web tenant user to broadcast into the physical operational environment.
+
+---
+
+### 4.8 LoRa Mesh Remediations & Technical Roadmap
+
+#### Low-Budget Microcontroller Remediations (Compatible with ATmega328P Nano)
+1. **Pre-Shared Key (PSK) Encryption for Payload:**
+   * Implement lightweight **AES-128 in CTR (Counter) mode** using a highly optimized C library (such as `tiny-AES-c` or `Speck`).
+   * Encrypt the 32-byte `text_msg` field and sensor payload using a network-wide pre-shared key stored in MCU flash.
+2. **Truncated 4-Byte Message Authentication Code (HMAC):**
+   * Compute a 4-byte CMAC (Cipher-based Message Authentication Code) or truncated HMAC-SHA256 across the packet header and encrypted payload.
+   * Append the MAC to the packet structure. Reject any packet where MAC validation fails before processing or relaying.
+3. **Monotonic Nonce & EEPROM Counter:**
+   * Maintain a 32-bit monotonically increasing sequence number stored periodically in EEPROM.
+   * Reject any packet with a sequence number less than or equal to the highest recorded sequence number for that `originNode`, neutralizing replay attacks.
+4. **Repeater Rate-Limiting & Airtime Throttling:**
+   * Enforce a hard throttle in repeater firmware: limit relay broadcasts to a maximum of 6 packets per minute per origin node to prevent broadcast storms and battery exhaustion.
+
+#### Enterprise-Grade Remediations (Mission-Critical / Tactical Deployments)
+1. **Hardware Migration to 32-Bit Secure Microcontrollers:**
+   * Replace ATmega328P with **ESP32-S3** or **Nordic nRF52840** paired with an **ATECC608A Cryptographic Secure Element**.
+   * Utilize hardware-accelerated **ChaCha20-Poly1305 AEAD** (Authenticated Encryption with Associated Data) for military-grade confidentiality and integrity.
+2. **Asymmetric Public Key Cryptography (ECDH per Node):**
+   * Each walkie-talkie holds a unique Curve25519 keypair. Unicast messages (`/102`) are encrypted directly using the recipient's public key (Diffie-Hellman shared secret). Only the intended recipient can decrypt the message; relaying repeaters pass encrypted ciphertext without reading capability.
+3. **Pseudo-Random Frequency Hopping (FHSS):**
+   * Synchronize nodes via GPS PPS or Gateway NTP to hop between 8 pseudo-random frequency channels across 433–434 MHz, preventing narrowband RF jamming and unauthorized signal interception.
+4. **Adoption of Standardized Audited Mesh Frameworks:**
+   * Migrate custom mesh logic to established, cryptographically audited open-source standards such as **Meshtastic Protocol (AES-256)** or **Reticulum Cryptographic Mesh**, providing Zero Trust networking over commodity LoRa hardware.
+
+---
 *Volume 2 Complete. Proceeding to Volume 3: Backend & API Security.*
 
 
@@ -310,6 +509,30 @@ const decoded = jwt.verify(token, process.env.JWT_SECRET || 'supersecretjwtkeych
 
 #### Remediations
 * **Fix:** Remove the fallback entirely. If `process.env.JWT_SECRET` is undefined at startup, the application should `throw new Error('FATAL: JWT_SECRET must be defined')` and crash immediately (Fail-Safe principle).
+
+### 1.3 LoRa Mesh Gateway & Walkie-Talkie Bridge Endpoint Vulnerabilities
+
+#### Current Design
+The backend exposes specific endpoints in `backend/src/routes/devices.js` to support bidirectional bridging between the cloud dashboard and the 433MHz LoRa physical mesh:
+* `POST /v1/devices/messages`: Ingests field walkie-talkie text messages and emergency SOS dispatches forwarded by the ESP Gateway.
+* `POST /v1/devices/send-message`: Accepts operator messages from `SosAlert.jsx` / `WeatherMonitor.jsx` and enqueues them into the gateway outbox.
+* `GET /v1/devices/:id/outbox` & `POST /v1/devices/outbox/:outboxId/ack`: Gateway polling and delivery acknowledgment.
+
+#### Critical Issues & Attack Scenarios
+* **Missing Origin Verification on Uplink (`/v1/devices/messages`):** The endpoint blindly accepts client-supplied `origin_node` parameters in the JSON payload without validating whether the transmitting gateway possesses authorization to speak for that node. Any script with HTTP access can inject fake walkie-talkie conversations or emergency SOS alerts directly into the platform without having an RF transceiver.
+* **Unrestricted Downlink Broadcasts (`/v1/devices/send-message`):** The endpoint lacks Role-Based Access Control (RBAC) validation. A standard user with basic telemetry viewing permissions can trigger global emergency broadcasts that are relayed over RF down to physical field walkie-talkies.
+* **Missing Rate-Limiting on RF Outbox:** The outbox queue has no message throttling or queue depth caps. A compromised web account can flood the outbox with thousands of downlink messages, forcing the ESP Gateway to monopolize the 433MHz radio frequency and violate regulatory RF duty cycles.
+
+#### Risk Assessment
+* **Severity:** High
+* **Engineering Impact:** Medium
+* **Probability:** High
+
+#### Remediations
+* **Immediate Fix:** 
+  1. Apply `authorizeRole('admin')` or a dedicated permission `can_broadcast_mesh` to `POST /v1/devices/send-message`.
+  2. Implement per-gateway HMAC request signing on `/v1/devices/messages` to verify that message packets genuinely originated from an authorized physical gateway.
+  3. Enforce strict rate-limiting on downlink queuing (e.g., maximum 5 downlink transmissions per minute per operator).
 
 ---
 
