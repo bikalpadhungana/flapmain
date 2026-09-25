@@ -21,7 +21,9 @@
 
 // ---- Mesh Network Constants ----
 #define DEFAULT_MAX_TTL       8       // Maximum hop limit before packet expiry
-#define SEEN_CACHE_SIZE       32      // Ring buffer capacity for deduplication
+#ifndef SEEN_CACHE_SIZE
+  #define SEEN_CACHE_SIZE     16      // Ring buffer capacity for deduplication
+#endif
 
 // ---- Packet Types ----
 #define PKT_TYPE_WEATHER      0       // Weather Telemetry (Temp, Hum, Pressure, Wind, Light)
@@ -84,34 +86,36 @@ struct __attribute__((packed)) LoRaMeshPacket {
 inline uint8_t parseTargetNodeFromText(const char* text, char* cleanTextBuffer, size_t bufferSize) {
   if (!text) return 0;
   uint8_t target = 0;
-  String str = String(text);
-  str.trim();
+  if (cleanTextBuffer && bufferSize > 0) {
+    strncpy(cleanTextBuffer, text, bufferSize - 1);
+    cleanTextBuffer[bufferSize - 1] = '\0';
 
-  int slashIdx = str.lastIndexOf('/');
-  if (slashIdx != -1 && slashIdx + 1 < (int)str.length()) {
-    int parsed = str.substring(slashIdx + 1).toInt();
-    if (parsed > 0 && parsed <= 255) {
-      target = (uint8_t)parsed;
-      str = str.substring(0, slashIdx);
-      str.trim();
-    }
-  } else if (str.startsWith("/")) {
-    int spaceIdx = str.indexOf(' ');
-    if (spaceIdx != -1) {
-      int parsed = str.substring(1, spaceIdx).toInt();
+    // 1. Check for suffix target: "Hello /102"
+    char* slash = strrchr(cleanTextBuffer, '/');
+    if (slash && slash[1] >= '0' && slash[1] <= '9') {
+      int parsed = atoi(slash + 1);
       if (parsed > 0 && parsed <= 255) {
         target = (uint8_t)parsed;
-        str = str.substring(spaceIdx + 1);
-        str.trim();
+        *slash = '\0';
+        int len = strlen(cleanTextBuffer);
+        while (len > 0 && cleanTextBuffer[len - 1] == ' ') {
+          cleanTextBuffer[--len] = '\0';
+        }
+      }
+    } else if (cleanTextBuffer[0] == '/' && cleanTextBuffer[1] >= '0' && cleanTextBuffer[1] <= '9') {
+      // 2. Check for prefix target: "/102 Hello"
+      char* space = strchr(cleanTextBuffer, ' ');
+      int parsed = atoi(cleanTextBuffer + 1);
+      if (parsed > 0 && parsed <= 255) {
+        target = (uint8_t)parsed;
+        if (space) {
+          memmove(cleanTextBuffer, space + 1, strlen(space + 1) + 1);
+        } else {
+          cleanTextBuffer[0] = '\0';
+        }
       }
     }
   }
-
-  if (cleanTextBuffer && bufferSize > 0) {
-    strncpy(cleanTextBuffer, str.c_str(), bufferSize - 1);
-    cleanTextBuffer[bufferSize - 1] = '\0';
-  }
-
   return target;
 }
 
