@@ -1,27 +1,32 @@
 /*
  * =================================================================================
  * FLAPMAIN LORA MESH ESP8266 WALKIE-TALKIE & EMERGENCY SOS COMMUNICATOR
- * Board: ESP8266 (NodeMCU v1.0 / Wemos D1 Mini / ESP-12) + SX1278 LoRa + 1.3" / 0.96" OLED
+ * Board: ESP8266 (NodeMCU v1.0 / Wemos D1 Mini / ESP-12E/F) + SX1278 LoRa + 1.3"/0.96" OLED
  * 
- * Hardware Pinout Mapping:
- * - Button 1 (SELECT)       : GPIO8 (Active LOW with internal pull-up)
- * - Button 2 (CLICK / SOS)  : GPIO9 (Active LOW with internal pull-up)
- * - I2C OLED SDA            : GPIO4  (D2 on NodeMCU)
- * - I2C OLED SCL            : GPIO5  (D1 on NodeMCU)
- * - SX1278 NSS / CS         : GPIO15 (D8 on NodeMCU)
- * - SX1278 RESET            : GPIO0  (D3 on NodeMCU)
- * - SX1278 DIO0             : GPIO16 (D0 on NodeMCU)
- * - SX1278 SPI SCK          : GPIO14 (D5 on NodeMCU)
- * - SX1278 SPI MISO         : GPIO12 (D6 on NodeMCU)
- * - SX1278 SPI MOSI         : GPIO13 (D7 on NodeMCU)
- * - Status LED              : GPIO2  (D4 Built-in LED, Active LOW)
- * - Battery ADC Input       : A0     (0..1V or 0..3.3V with onboard divider)
- * - Buzzer (Optional)       : Configurable via BUZZER_PIN in config.h (-1 if disabled)
+ * Hardware Controls (Two Push Buttons):
+ * - Button 1 (SELECT): GPIO8 (SD1 Pin) - Active LOW with INPUT_PULLUP
+ * - Button 2 (CLICK) : GPIO9 (SD2 Pin) - Active LOW with INPUT_PULLUP
+ * - Long-Press Button 2 (>1.5s): INSTANT EMERGENCY SOS BROADCAST
  * 
- * Display Compatibility:
- * Direct Page Mode MicroOLED driver supporting BOTH 1.3-inch SH1106 and 0.96-inch
- * SSD1306 displays with auto-detection for 0x3C / 0x3D I2C slave addresses.
- * Zero-RAM framebuffer design avoids memory overhead and heap fragmentation.
+ * Pinout Mapping (NodeMCU / ESP-12):
+ * - OLED SDA     : GPIO4  (D2) [I2C SDA]
+ * - OLED SCL     : GPIO5  (D1) [I2C SCL]
+ * - LoRa SS / CS : GPIO15 (D8) [SPI CS]
+ * - LoRa RESET   : GPIO0  (D3) [RST]
+ * - LoRa DIO0    : GPIO16 (D0) [DIO0 Interrupt]
+ * - SPI SCK      : GPIO14 (D5)
+ * - SPI MISO     : GPIO12 (D6)
+ * - SPI MOSI     : GPIO13 (D7)
+ * - SELECT Button: GPIO8  (SD1) [Active LOW with internal pull-up]
+ * - CLICK Button : GPIO9  (SD2) [Active LOW with internal pull-up]
+ * - Battery ADC  : A0     (0..3.3V ADC)
+ * - Status LED   : GPIO2  (D4 Built-in LED - Active LOW)
+ * - Piezo Buzzer : Defined in config.h (0 = disabled, e.g. GPIO10/SD3 if connected)
+ *
+ * NOTE ON ESP8266 GPIO8 & GPIO9:
+ * On NodeMCU / ESP-12, GPIO8 & GPIO9 map to the SD1 and SD2 header pins.
+ * In the Arduino IDE, set Tools -> Flash Mode to 'DIO' (Dual I/O) so the flash
+ * controller does not reserve GPIO9/GPIO8 for Quad-SPI data lines.
  * =================================================================================
  */
 
@@ -34,7 +39,7 @@
   #include "config.h"
 #endif
 
-// Deduplication cache capacity for ESP8266
+// Set deduplication cache size for ESP8266 Walkie
 #ifndef SEEN_CACHE_SIZE
   #define SEEN_CACHE_SIZE 16
 #endif
@@ -43,50 +48,33 @@
 
 // ---- Default Node ID & Hardware Pins ----
 #ifndef WALKIE_NODE_ID
-  #define WALKIE_NODE_ID  103   // Default Node ID for ESP8266 Walkie (103 = Walkie Charlie)
+  #define WALKIE_NODE_ID  103   // Default Node ID for ESP8266 Walkie Charlie (103)
 #endif
 
-// Display Pins (Standard ESP8266 NodeMCU I2C)
-#ifndef OLED_SDA_PIN
-  #define OLED_SDA_PIN    4     // GPIO4 (D2)
-#endif
-#ifndef OLED_SCL_PIN
-  #define OLED_SCL_PIN    5     // GPIO5 (D1)
-#endif
+#define OLED_SDA_PIN      4     // D2 (GPIO4) Standard NodeMCU I2C SDA
+#define OLED_SCL_PIN      5     // D1 (GPIO5) Standard NodeMCU I2C SCL
+#define LORA_SS_PIN       15    // D8 (GPIO15) SPI Chip Select
+#define LORA_RST_PIN      0     // D3 (GPIO0) SX1278 Reset
+#define LORA_DIO0_PIN     16    // D0 (GPIO16) SX1278 Interrupt Pin
+#define BATT_PIN          A0    // A0 Analog Battery Input (0..3.3V)
+#define STATUS_LED_PIN    2     // D4 (GPIO2) Built-in LED (Active LOW on ESP8266)
 
-// SX1278 LoRa SPI & Control Pins
-#ifndef LORA_SS_PIN
-  #define LORA_SS_PIN     15    // GPIO15 (D8) SPI Chip Select
-#endif
-#ifndef LORA_RST_PIN
-  #define LORA_RST_PIN    0     // GPIO0  (D3) SX1278 Reset
-#endif
-#ifndef LORA_DIO0_PIN
-  #define LORA_DIO0_PIN   16    // GPIO16 (D0) SX1278 Interrupt Pin
-#endif
-
-// Two-Button Navigation & Emergency System Pins
+// Two-Button Navigation & Emergency Action System Pins
 #ifndef BTN_SELECT_PIN
-  #define BTN_SELECT_PIN  8     // GPIO8 Active LOW with internal pull-up
+  #define BTN_SELECT_PIN  8     // GPIO8 (SD1 Pin) - Active LOW with internal pull-up
 #endif
 #ifndef BTN_CLICK_PIN
-  #define BTN_CLICK_PIN   9     // GPIO9 Active LOW with internal pull-up
+  #define BTN_CLICK_PIN   9     // GPIO9 (SD2 Pin) - Active LOW with internal pull-up
 #endif
 #ifndef BUZZER_PIN
-  #define BUZZER_PIN      -1    // Optional Buzzer pin (-1 if disabled)
+  #define BUZZER_PIN      0     // 0 = Disabled
 #endif
 
 #define SOS_BUTTON_PIN    BTN_CLICK_PIN // Backward compatibility alias
-#define BATT_PIN          A0    // A0 Analog Battery Input
-#define STATUS_LED_PIN    2     // GPIO2 (D4) Built-in LED (Active LOW on ESP-12)
-
-// Helper LED macros for Active LOW built-in LED
-inline void ledOn()  { digitalWrite(STATUS_LED_PIN, LOW); }
-inline void ledOff() { digitalWrite(STATUS_LED_PIN, HIGH); }
 
 // =================================================================================
 // ULTRA-COMPACT ZERO-RAM OLED DRIVER (SH1106 1.3" & SSD1306 0.96")
-// Uses Direct Page Mode over I2C without any 1024-byte RAM framebuffer.
+// Direct Page Mode over I2C compatible with ESP8266 Wire driver
 // =================================================================================
 class MicroOLED {
 private:
@@ -105,10 +93,10 @@ public:
     Wire.endTransmission();
   }
 
-  bool begin(uint8_t preferred = 0x3C, uint8_t sda = OLED_SDA_PIN, uint8_t scl = OLED_SCL_PIN) {
-    Wire.begin(sda, scl);
-    Wire.setClock(400000);
-
+  bool begin(uint8_t preferred = 0x3C, uint8_t sdaPin = OLED_SDA_PIN, uint8_t sclPin = OLED_SCL_PIN) {
+    Wire.begin(sdaPin, sclPin);
+    Wire.setClock(400000); // 400kHz fast I2C mode
+    
     i2cAddr = preferred;
     Wire.beginTransmission(i2cAddr);
     if (Wire.endTransmission() != 0) {
@@ -260,15 +248,15 @@ uint8_t  lastRxPktType = PKT_TYPE_TEXT;
 uint8_t  lastRxAlertLevel = 0;
 unsigned long lastRxTime = 0;
 
-// ---- Received Messages Inbox History (Compact RAM Buffer) ----
-#define INBOX_CAPACITY 5
+// ---- Received Messages Inbox History (RAM Buffer) ----
+#define INBOX_CAPACITY 4
 
 struct ReceivedMessage {
   uint8_t senderNode;
   uint8_t targetNode;
   int8_t  rssi;
   uint8_t alertLevel;
-  char    text[28];
+  char    text[26];
 };
 
 ReceivedMessage messageInbox[INBOX_CAPACITY];
@@ -337,18 +325,18 @@ void triggerInstantSos();
 // ---- Helper Functions ----
 uint16_t readBatteryMv() {
   int raw = analogRead(BATT_PIN);
-  // NodeMCU onboard divider (220k/100k) scales 0..3.3V down to 0..1.0V (0..1023 ADC)
+  // ESP8266 0..1023 ADC mapped to 0..3300 mV (with NodeMCU voltage divider)
   return (uint16_t)((raw * 3300UL) / 1023UL);
 }
 
 void playToneBeep(uint16_t freq, uint8_t duration) {
-  #if defined(BUZZER_PIN) && BUZZER_PIN >= 0
+  #if defined(BUZZER_PIN) && BUZZER_PIN > 0
     tone(BUZZER_PIN, freq, duration);
   #endif
 }
 
 void soundAlarm() {
-  #if defined(BUZZER_PIN) && BUZZER_PIN >= 0
+  #if defined(BUZZER_PIN) && BUZZER_PIN > 0
     for (uint8_t i = 0; i < 2; i++) {
       tone(BUZZER_PIN, 2400, 80);
       delay(90);
@@ -425,7 +413,7 @@ void updateOledDisplay() {
     // ── 1. IDLE / STANDBY DASHBOARD ──────────────────────────────────────────
     case UI_STATE_IDLE: {
       char headerBuf[16];
-      snprintf(headerBuf, sizeof(headerBuf), "ESP8266 #%d", WALKIE_NODE_ID);
+      snprintf(headerBuf, sizeof(headerBuf), "ESP #%d", WALKIE_NODE_ID);
       drawHeader(headerBuf);
 
       if (lastRxAlertLevel > 0 && (millis() - lastRxTime < 30000)) {
@@ -641,22 +629,23 @@ void sendWalkieMessage(const char* text, uint8_t alertLevel, uint8_t pktType, ui
   uint16_t msgId = ((uint16_t)pkt.msgIdHi << 8) | pkt.msgIdLo;
   dedupCache.markSeen(WALKIE_NODE_ID, msgId);
 
-  ledOn();
+  // Active LOW LED on ESP8266
+  digitalWrite(STATUS_LED_PIN, LOW);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&pkt, sizeof(pkt));
   int res = LoRa.endPacket();
-  ledOff();
+  digitalWrite(STATUS_LED_PIN, HIGH);
 
   LoRa.receive();
 
   Serial.println(F("\n=============================================="));
   if (res == 1) {
-    Serial.print(F("🚀 [ESP8266 TX SUCCESS] Sent MsgID=#")); Serial.println(msgId);
+    Serial.print(F("🚀 [ESP WALKIE TX SUCCESS] Sent MsgID=#")); Serial.println(msgId);
     Serial.print(F(" - Target Node: #")); Serial.print(targetNode);
     Serial.println(targetNode == 0 ? F(" (BROADCAST)") : F(" (DIRECT)"));
     Serial.print(F(" - Message    : \"")); Serial.print(pkt.text_msg); Serial.println(F("\""));
   } else {
-    Serial.println(F("❌ [ESP8266 TX FAIL] LoRa radio transmit error!"));
+    Serial.println(F("❌ [ESP WALKIE TX FAIL] LoRa radio transmit error!"));
   }
   Serial.println(F("=============================================="));
 
@@ -674,7 +663,7 @@ void sendWalkieMessage(const char* text, uint8_t alertLevel, uint8_t pktType, ui
 void triggerInstantSos() {
   soundAlarm();
   char sosMsg[28];
-  snprintf(sosMsg, sizeof(sosMsg), "SOS FROM ESP #%d!", WALKIE_NODE_ID);
+  snprintf(sosMsg, sizeof(sosMsg), "ESP SOS FROM NODE #%d!", WALKIE_NODE_ID);
   sendWalkieMessage(sosMsg, 2, PKT_TYPE_SOS, 0);
   triggerSplash("! EMERGENCY SOS !", "BROADCAST TO MESH");
 }
@@ -794,7 +783,7 @@ void handleClickButton() {
 void checkButtons() {
   unsigned long now = millis();
 
-  // 1. SELECT BUTTON (Pin GPIO8) — Active LOW
+  // 1. SELECT BUTTON (GPIO8 / Pin SD1) — Active LOW
   static bool prevSelState = HIGH;
   static unsigned long selDebounceTime = 0;
   bool curSelState = digitalRead(BTN_SELECT_PIN);
@@ -805,7 +794,7 @@ void checkButtons() {
   }
   prevSelState = curSelState;
 
-  // 2. CLICK BUTTON (Pin GPIO9) — Active LOW with Long-Press SOS Shortcut
+  // 2. CLICK BUTTON (GPIO9 / Pin SD2) — Active LOW with Long-Press SOS Shortcut
   static bool prevClkState = HIGH;
   static unsigned long clkPressStart = 0;
   static bool longPressTriggered = false;
@@ -831,19 +820,19 @@ void checkButtons() {
 }
 
 void printSerialHelp() {
-  Serial.println(F("\n=== FLAPMAIN ESP8266 LORA MESH WALKIE CLI ==="));
+  Serial.println(F("\n=== FLAPMAIN ESP8266 LORA MESH WALKIE-TALKIE CLI ==="));
   Serial.print(F(" Node ID: #")); Serial.println(WALKIE_NODE_ID);
   Serial.println(F(" Hardware Controls:"));
-  Serial.println(F("  - Button 1 (GPIO8): SELECT / Next Item / Browse Inbox."));
-  Serial.println(F("  - Button 2 (GPIO9): CLICK / Confirm / Send Quick SMS."));
-  Serial.println(F("  - Hold Button 2 (1.5s): INSTANT EMERGENCY SOS BROADCAST."));
+  Serial.println(F("  - Button 1 (GPIO8 / SD1): SELECT / Next Item / Browse Inbox."));
+  Serial.println(F("  - Button 2 (GPIO9 / SD2): CLICK / Confirm / Send Quick SMS."));
+  Serial.println(F("  - Hold Button 2 (1.5s) : INSTANT EMERGENCY SOS BROADCAST."));
   Serial.println(F(" Serial Commands:"));
   Serial.println(F("  - Type text and hit Enter to broadcast to ALL nodes."));
-  Serial.println(F("  - Type 'text /{node_id}' to send to specific node (e.g., 'Hello /101')."));
+  Serial.println(F("  - Type 'text /{node_id}' to send to specific node (e.g., 'Hello /102')."));
   Serial.println(F("  - Type '/sos <message>' to broadcast an Emergency SOS alert."));
   Serial.println(F("  - Type '/ping' to send a heartbeat ping."));
   Serial.println(F("  - Type '/help' to display this menu."));
-  Serial.println(F("============================================\n"));
+  Serial.println(F("===========================================\n"));
 }
 
 void processIncomingPacket(int packetSize) {
@@ -864,9 +853,9 @@ void processIncomingPacket(int packetSize) {
   bool isForMe = (pkt.targetNode == 0 || pkt.targetNode == WALKIE_NODE_ID);
 
   if (isForMe) {
-    ledOn();
+    digitalWrite(STATUS_LED_PIN, LOW); // LED ON (Active LOW on ESP8266)
     delay(30);
-    ledOff();
+    digitalWrite(STATUS_LED_PIN, HIGH); // LED OFF
 
     if (pkt.alert_level > 0) {
       soundAlarm();
@@ -877,7 +866,7 @@ void processIncomingPacket(int packetSize) {
     saveToInbox(pkt, rssi);
 
     Serial.println(F("\n=============================================="));
-    Serial.print(F("📥 [ESP8266 RX MESH DATA] MsgID=#")); Serial.println(msgId);
+    Serial.print(F("📥 [ESP WALKIE RECEIVED MESH DATA] MsgID=#")); Serial.println(msgId);
     Serial.print(F(" - Origin Node ID : #")); Serial.println(pkt.originNode);
     Serial.print(F(" - Target Node ID : #")); Serial.print(pkt.targetNode);
     Serial.println(pkt.targetNode == 0 ? F(" (BROADCAST)") : F(" (DIRECT)"));
@@ -909,15 +898,15 @@ void processIncomingPacket(int packetSize) {
     relayPkt.ttl -= 1;
     delay(random(50, 150));
 
-    ledOn();
+    digitalWrite(STATUS_LED_PIN, LOW); // LED ON
     LoRa.beginPacket();
     LoRa.write((uint8_t*)&relayPkt, sizeof(relayPkt));
     LoRa.endPacket();
-    ledOff();
+    digitalWrite(STATUS_LED_PIN, HIGH); // LED OFF
 
     LoRa.receive();
 
-    Serial.print(F("🚀 [ESP8266 RELAY] Forwarded MsgID=#"));
+    Serial.print(F("🚀 [ESP WALKIE RELAY] Forwarded MsgID=#"));
     Serial.print(msgId);
     Serial.print(F(" (New TTL="));
     Serial.print(relayPkt.ttl);
@@ -930,37 +919,34 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
-  // Disable ESP8266 WiFi to save battery and eliminate RF noise on LoRa
+  // Turn off Wi-Fi on boot to save power and eliminate 2.4GHz RF noise
   WiFi.mode(WIFI_OFF);
   WiFi.forceSleepBegin();
   delay(1);
 
   pinMode(STATUS_LED_PIN, OUTPUT);
-  ledOff();
+  digitalWrite(STATUS_LED_PIN, HIGH); // LED OFF (Active LOW)
 
   // Configure Two Push Buttons with Internal Pull-Ups
   pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
   pinMode(BTN_CLICK_PIN,  INPUT_PULLUP);
 
-  #if defined(BUZZER_PIN) && BUZZER_PIN >= 0
+  #if defined(BUZZER_PIN) && BUZZER_PIN > 0
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
   #endif
 
-  // Initialize MicroOLED Display (SDA=GPIO4, SCL=GPIO5)
+  // Initialize OLED (1.3" SH1106 & 0.96" SSD1306, 0x3C or 0x3D)
   if (display.begin(0x3C, OLED_SDA_PIN, OLED_SCL_PIN)) {
     oledPresent = true;
-    display.printLine(2, F("FLAPMAIN ESP8266"));
+    display.printLine(2, F("FLAPMAIN ESP MESH"));
     display.setCursor(3, 0);
-    display.print(F("WALKIE #"));
+    display.print(F("ESP WALKIE #"));
     display.printInt(WALKIE_NODE_ID);
     display.clearToEol();
     display.printLine(4, F("Initializing..."));
-  } else {
-    Serial.println(F("WARNING: OLED Display not found at 0x3C/0x3D! Check SDA/SCL pins."));
   }
 
-  // Initialize SX1278 LoRa Radio
   LoRa.setPins(LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
   LoRa.setSPIFrequency(4000000);
 
@@ -991,7 +977,7 @@ void setup() {
 
 // ---- Main Loop ----
 void loop() {
-  // Feed ESP8266 watchdog
+  // Yield to ESP8266 background Watchdog Timer
   yield();
 
   // 1. Process LoRa Packet Reception
@@ -1028,11 +1014,11 @@ void loop() {
         if (strcasecmp(serialBuf, "/help") == 0) {
           printSerialHelp();
         } else if (strcasecmp(serialBuf, "/ping") == 0) {
-          sendWalkieMessage("PING HEARTBEAT", 0, PKT_TYPE_HEARTBEAT, TARGET_NODE_IDS[currentTargetIdx]);
+          sendWalkieMessage("ESP PING HEARTBEAT", 0, PKT_TYPE_HEARTBEAT, TARGET_NODE_IDS[currentTargetIdx]);
         } else if (strncasecmp(serialBuf, "/sos", 4) == 0) {
           char* text = serialBuf + 4;
           while (*text == ' ') text++;
-          sendWalkieMessage((*text ? text : "CRITICAL EMERGENCY SOS!"), 2, PKT_TYPE_SOS, 0);
+          sendWalkieMessage((*text ? text : "CRITICAL ESP EMERGENCY SOS!"), 2, PKT_TYPE_SOS, 0);
         } else {
           sendWalkieMessage(serialBuf, 0, PKT_TYPE_TEXT, TARGET_NODE_IDS[currentTargetIdx]);
         }
