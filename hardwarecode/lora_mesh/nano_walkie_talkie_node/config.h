@@ -7,7 +7,12 @@
 #ifndef WALKIE_CONFIG_H
 #define WALKIE_CONFIG_H
 
-// Unique Node ID for this Walkie-Talkie communicator (e.g., 101 for Walkie Alpha, 102 for Walkie Bravo)
+// Unique Node ID for this Walkie-Talkie communicator:
+//   - Set to 101 for Walkie Alpha (Device #1)
+//   - Set to 102 for Walkie Bravo (Device #2)
+//   - Set to 103 for Walkie Charlie (ESP8266)
+// IMPORTANT: Two walkie-talkies MUST have different Node IDs!
+// If both devices use ID 101, mesh deduplication will drop messages as duplicates!
 #define WALKIE_NODE_ID 101
 
 // Radio Frequency Settings

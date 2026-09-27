@@ -54,18 +54,18 @@
 
 #define OLED_SDA_PIN    4    // D2 (GPIO4)  Standard NodeMCU I2C SDA
 #define OLED_SCL_PIN    5    // D1 (GPIO5)  Standard NodeMCU I2C SCL
-#define LORA_SS_PIN     10   // D8 (GPIO15) SPI Chip Select
-#define LORA_RST_PIN    9    // D3 (GPIO0)  SX1278 Reset
-#define LORA_DIO0_PIN   2   // D0 (GPIO16) SX1278 Interrupt Pin
-#define BATT_PIN        A0   // A0 Analog Battery Input
-#define STATUS_LED_PIN  16    // D4 (GPIO2)  Built-in LED (Active LOW)
+#define LORA_SS_PIN     15   // D8 (GPIO15) SPI Chip Select
+#define LORA_RST_PIN    0    // D3 (GPIO0)  SX1278 Reset
+#define LORA_DIO0_PIN   16   // D0 (GPIO16) SX1278 Interrupt Pin
+#define BATT_PIN        A0   // A0 Analog Battery Input (0..3.3V)
+#define STATUS_LED_PIN  2    // D4 (GPIO2)  Built-in LED (Active LOW on ESP8266)
 
-// 2-Button Interactive Hardware Navigation Pins (NodeMCU / Wemos D1 Mini)
+// 2-Button Interactive Hardware Navigation Pins (NodeMCU SD1 / SD2 Header Pins)
 #ifndef BTN_SELECT_PIN
-  #define BTN_SELECT_PIN  7  // Pin D5 (GPIO14, Active LOW with INPUT_PULLUP)
+  #define BTN_SELECT_PIN  8  // GPIO8 (SD1 Pin, Active LOW with INPUT_PULLUP)
 #endif
 #ifndef BTN_CLICK_PIN
-  #define BTN_CLICK_PIN   8   // Pin D6 (GPIO12, Active LOW with INPUT_PULLUP)
+  #define BTN_CLICK_PIN   9  // GPIO9 (SD2 Pin, Active LOW with INPUT_PULLUP)
 #endif
 
 // ---- Universal SH1106 (1.3") & SSD1306 (0.96") OLED Display Class ----

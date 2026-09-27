@@ -38,6 +38,7 @@
 #ifndef WALKIE_NODE_ID
   #define WALKIE_NODE_ID  101   // Default: 101 for Alpha, 102 for Bravo
 #endif
+uint8_t currentWalkieNodeId = WALKIE_NODE_ID;
 
 #ifndef LORA_SS_PIN
   #define LORA_SS_PIN     10    // D10 SPI Chip Select
@@ -445,7 +446,7 @@ void updateOledDisplay() {
     // ── 1. IDLE / STANDBY DASHBOARD ──────────────────────────────────────────
     case UI_STATE_IDLE: {
       char headerBuf[16];
-      snprintf(headerBuf, sizeof(headerBuf), "WALKIE #%d", WALKIE_NODE_ID);
+      snprintf(headerBuf, sizeof(headerBuf), "WALKIE #%d", currentWalkieNodeId);
       drawHeader(headerBuf);
 
       if (lastRxAlertLevel > 0 && (millis() - lastRxTime < 30000)) {
@@ -648,7 +649,7 @@ void sendWalkieMessage(const char* text, uint8_t alertLevel, uint8_t pktType, ui
 
   pkt.msgIdHi = (uint8_t)(msgCounter >> 8);
   pkt.msgIdLo = (uint8_t)(msgCounter & 0xFF);
-  pkt.originNode = WALKIE_NODE_ID;
+  pkt.originNode = currentWalkieNodeId;
   pkt.targetNode = targetNode;
   pkt.ttl = DEFAULT_MAX_TTL;
   pkt.packetType = pktType;
@@ -659,7 +660,7 @@ void sendWalkieMessage(const char* text, uint8_t alertLevel, uint8_t pktType, ui
   pkt.text_msg[sizeof(pkt.text_msg) - 1] = '\0';
 
   uint16_t msgId = ((uint16_t)pkt.msgIdHi << 8) | pkt.msgIdLo;
-  dedupCache.markSeen(WALKIE_NODE_ID, msgId);
+  dedupCache.markSeen(currentWalkieNodeId, msgId);
 
   digitalWrite(STATUS_LED_PIN, HIGH);
   LoRa.beginPacket();
@@ -672,29 +673,21 @@ void sendWalkieMessage(const char* text, uint8_t alertLevel, uint8_t pktType, ui
   Serial.println(F("\n=============================================="));
   if (res == 1) {
     Serial.print(F("🚀 [WALKIE TX SUCCESS] Sent MsgID=#")); Serial.println(msgId);
+    Serial.print(F(" - Origin Node: #")); Serial.println(currentWalkieNodeId);
     Serial.print(F(" - Target Node: #")); Serial.print(targetNode);
-    Serial.println(targetNode == 0 ? F(" (BROADCAST)") : F(" (DIRECT)"));
+    Serial.println(targetNode == 0 ? F(" (BROADCAST ALL)") : F(" (DIRECT)"));
     Serial.print(F(" - Message    : \"")); Serial.print(pkt.text_msg); Serial.println(F("\""));
   } else {
     Serial.println(F("❌ [WALKIE TX FAIL] LoRa radio transmit error!"));
   }
   Serial.println(F("=============================================="));
-
-  lastRxNode = WALKIE_NODE_ID;
-  lastRxRssi = 0;
-  lastRxSnr = 0.0;
-  strncpy(lastRxMsg, pkt.text_msg, sizeof(lastRxMsg) - 1);
-  lastRxMsg[sizeof(lastRxMsg) - 1] = '\0';
-  lastRxPktType = pktType;
-  lastRxAlertLevel = alertLevel;
-  lastRxTime = millis();
 }
 
 // ---- Instant Emergency SOS Trigger ----
 void triggerInstantSos() {
   soundAlarm();
   char sosMsg[28];
-  snprintf(sosMsg, sizeof(sosMsg), "SOS FROM NODE #%d!", WALKIE_NODE_ID);
+  snprintf(sosMsg, sizeof(sosMsg), "SOS FROM NODE #%d!", currentWalkieNodeId);
   sendWalkieMessage(sosMsg, 2, PKT_TYPE_SOS, 0);
   triggerSplash("! EMERGENCY SOS !", "BROADCAST TO MESH");
 }
@@ -885,12 +878,15 @@ void checkButtons() {
 
 void printSerialHelp() {
   Serial.println(F("\n=== FLAPMAIN LORA MESH WALKIE-TALKIE CLI ==="));
-  Serial.print(F(" Node ID: #")); Serial.println(WALKIE_NODE_ID);
+  Serial.print(F(" Node ID: #")); Serial.print(currentWalkieNodeId);
+  Serial.println(currentWalkieNodeId == 101 ? F(" (Walkie Alpha)") : (currentWalkieNodeId == 102 ? F(" (Walkie Bravo)") : F("")));
   Serial.println(F(" Hardware Controls:"));
   Serial.println(F("  - Button 1 (Pin D7): SELECT / Next Item / Browse Inbox."));
   Serial.println(F("  - Button 2 (Pin D8): CLICK / Confirm / Send Quick SMS."));
   Serial.println(F("  - Hold Button 2 (1.5s): INSTANT EMERGENCY SOS BROADCAST."));
   Serial.println(F(" Serial Commands for Interactive Testing:"));
+  Serial.println(F("  - '/id <number>'   : Change this node's ID (e.g. '/id 102')."));
+  Serial.println(F("  - '/target <num>'  : Change target destination node (0=All, 101, 102, etc.)."));
   Serial.println(F("  - 's' or '/select': Simulate pressing SELECT button (changes screen)."));
   Serial.println(F("  - 'c' or '/click' : Simulate pressing CLICK button (enters/sends)."));
   Serial.println(F("  - '/diag' or '/test': Check live pin voltages and OLED status."));
@@ -903,7 +899,23 @@ void printSerialHelp() {
 }
 
 void processIncomingPacket(int packetSize) {
-  if (packetSize < 50 || packetSize > (int)sizeof(LoRaMeshPacket) + 10) return;
+  int rssi = LoRa.packetRssi();
+  float snr = LoRa.packetSnr();
+
+  Serial.println(F("\n=============================================="));
+  Serial.print(F("📡 [LORA RF RX] Received packet: "));
+  Serial.print(packetSize);
+  Serial.print(F(" bytes | RSSI="));
+  Serial.print(rssi);
+  Serial.print(F(" dBm | SNR="));
+  Serial.print(snr, 1);
+  Serial.println(F(" dB"));
+
+  if (packetSize < 50 || packetSize > (int)sizeof(LoRaMeshPacket) + 10) {
+    Serial.println(F("⚠️ [RX REJECT] Invalid packet size! Outside 50..66 byte window."));
+    Serial.println(F("=============================================="));
+    return;
+  }
 
   LoRaMeshPacket pkt;
   memset(&pkt, 0, sizeof(pkt));
@@ -911,13 +923,31 @@ void processIncomingPacket(int packetSize) {
   LoRa.readBytes((uint8_t*)&pkt, toRead);
 
   uint16_t msgId = ((uint16_t)pkt.msgIdHi << 8) | pkt.msgIdLo;
-  int rssi = LoRa.packetRssi();
-  float snr = LoRa.packetSnr();
 
-  if (dedupCache.alreadySeen(pkt.originNode, msgId)) return;
+  Serial.print(F(" - Origin Node ID : #")); Serial.println(pkt.originNode);
+  Serial.print(F(" - Target Node ID : #")); Serial.print(pkt.targetNode);
+  Serial.println(pkt.targetNode == 0 ? F(" (BROADCAST ALL)") : F(" (DIRECT)"));
+  Serial.print(F(" - Packet Type    : ")); Serial.println(pkt.packetType);
+  Serial.print(F(" - MsgID / TTL     : #")); Serial.print(msgId); Serial.print(F(" / TTL=")); Serial.println(pkt.ttl);
+  Serial.print(F(" - Message Text   : \"")); Serial.print(pkt.text_msg); Serial.println(F("\""));
+
+  // Detect duplicate Node ID conflict
+  if (pkt.originNode == currentWalkieNodeId) {
+    Serial.println(F("⚠️ [WARNING: DUPLICATE NODE ID DETECTED!]"));
+    Serial.print(F("   The transmitter has the SAME Node ID (#"));
+    Serial.print(pkt.originNode);
+    Serial.println(F(") as this receiver!"));
+    Serial.println(F("   👉 Change this node's ID by typing '/id 102' in the Serial Monitor!"));
+  }
+
+  if (dedupCache.alreadySeen(pkt.originNode, msgId)) {
+    Serial.println(F("⚠️ [RX DEDUP] Packet already seen & processed. Ignoring duplicate."));
+    Serial.println(F("=============================================="));
+    return;
+  }
   dedupCache.markSeen(pkt.originNode, msgId);
 
-  bool isForMe = (pkt.targetNode == 0 || pkt.targetNode == WALKIE_NODE_ID);
+  bool isForMe = (pkt.targetNode == 0 || pkt.targetNode == currentWalkieNodeId);
 
   if (isForMe) {
     digitalWrite(STATUS_LED_PIN, HIGH);
@@ -932,15 +962,7 @@ void processIncomingPacket(int packetSize) {
 
     saveToInbox(pkt, rssi);
 
-    Serial.println(F("\n=============================================="));
-    Serial.print(F("📥 [WALKIE RECEIVED MESH DATA] MsgID=#")); Serial.println(msgId);
-    Serial.print(F(" - Origin Node ID : #")); Serial.println(pkt.originNode);
-    Serial.print(F(" - Target Node ID : #")); Serial.print(pkt.targetNode);
-    Serial.println(pkt.targetNode == 0 ? F(" (BROADCAST)") : F(" (DIRECT)"));
-    Serial.print(F(" - Packet Type    : ")); Serial.println(pkt.packetType);
-    Serial.print(F(" - Message Text   : \"")); Serial.print(pkt.text_msg); Serial.println(F("\""));
-    Serial.print(F(" - Signal RSSI/SNR: ")); Serial.print(rssi); Serial.print(F(" dBm / ")); Serial.print(snr, 1); Serial.println(F(" dB"));
-    Serial.println(F("=============================================="));
+    Serial.println(F("✅ [RX ACCEPTED] Message stored in inbox & displayed on screen!"));
 
     lastRxNode = pkt.originNode;
     lastRxRssi = rssi;
@@ -957,7 +979,14 @@ void processIncomingPacket(int packetSize) {
       }
       updateOledDisplay();
     }
+  } else {
+    Serial.print(F("ℹ️ [RX NOT FOR THIS NODE] Packet target is #"));
+    Serial.print(pkt.targetNode);
+    Serial.print(F(", but this node is #"));
+    Serial.print(currentWalkieNodeId);
+    Serial.println(F(" -> Relaying to mesh."));
   }
+  Serial.println(F("=============================================="));
 
   // Automatic LoRa Mesh Relay Forwarding (if TTL > 1)
   if (pkt.ttl > 1) {
@@ -1002,7 +1031,7 @@ void setup() {
     display.printLine(2, F("FLAPMAIN LORA MESH"));
     display.setCursor(3, 0);
     display.print(F("WALKIE #"));
-    display.printInt(WALKIE_NODE_ID);
+    display.printInt(currentWalkieNodeId);
     display.clearToEol();
     display.printLine(4, F("Initializing..."));
   }
@@ -1071,6 +1100,34 @@ void loop() {
           printSerialHelp();
         } else if (strcasecmp(serialBuf, "/diag") == 0 || strcasecmp(serialBuf, "/test") == 0) {
           printPinDiagnostics();
+        } else if (strncasecmp(serialBuf, "/id ", 4) == 0) {
+          int newId = atoi(serialBuf + 4);
+          if (newId > 0 && newId <= 255) {
+            currentWalkieNodeId = (uint8_t)newId;
+            Serial.print(F("🆔 [NODE ID UPDATED] This walkie is now Node #"));
+            Serial.println(currentWalkieNodeId);
+            updateOledDisplay();
+          } else {
+            Serial.println(F("❌ Invalid Node ID! Must be 1..255."));
+          }
+        } else if (strncasecmp(serialBuf, "/target ", 8) == 0) {
+          int newTarget = atoi(serialBuf + 8);
+          if (newTarget >= 0 && newTarget <= 255) {
+            bool found = false;
+            for (uint8_t i = 0; i < TARGET_COUNT; i++) {
+              if (TARGET_NODE_IDS[i] == newTarget) {
+                currentTargetIdx = i;
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              currentTargetIdx = 0;
+            }
+            Serial.print(F("🎯 [TARGET UPDATED] Target Node is now #"));
+            Serial.println(newTarget);
+            updateOledDisplay();
+          }
         } else if (strcasecmp(serialBuf, "/select") == 0 || strcasecmp(serialBuf, "s") == 0 || strcmp(serialBuf, "1") == 0) {
           Serial.println(F("💻 [SERIAL CLI] Simulated SELECT button!"));
           handleSelectButton();
