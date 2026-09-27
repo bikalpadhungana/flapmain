@@ -3,7 +3,11 @@
 #ifndef FONT5X7_H
 #define FONT5X7_H
 
-#include <avr/pgmspace.h>
+#if defined(ESP8266) || defined(ESP32)
+  #include <pgmspace.h>
+#else
+  #include <avr/pgmspace.h>
+#endif
 
 static const uint8_t FONT_5X7[475] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5F, 0x00, 0x00, 0x00, 0x07, 0x00, 0x07, 0x00,
