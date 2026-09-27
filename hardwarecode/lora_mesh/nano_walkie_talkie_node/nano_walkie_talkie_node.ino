@@ -316,6 +316,7 @@ void sendWalkieMessage(const char* text, uint8_t alertLevel = 0, uint8_t pktType
 void updateOledDisplay();
 void playToneBeep(uint16_t freq = 1800, uint8_t duration = 30);
 void triggerInstantSos();
+void printPinDiagnostics();
 
 // ---- Helper Functions ----
 uint16_t readBatteryMv() {
@@ -348,6 +349,43 @@ void triggerSplash(const char* l1, const char* l2) {
   splashStartTime = millis();
   uiState = UI_STATE_SPLASH;
   updateOledDisplay();
+}
+
+void printPinDiagnostics() {
+  Serial.println(F("\n=============================================="));
+  Serial.println(F("🔍 [HARDWARE PIN & BUTTON DIAGNOSTIC]"));
+  Serial.print(F(" - SELECT Button (Pin D")); Serial.print(BTN_SELECT_PIN); Serial.print(F("): "));
+  int sVal = digitalRead(BTN_SELECT_PIN);
+  if (sVal == LOW) {
+    Serial.println(F("LOW (0V / PRESSED / SHORTED TO GND)"));
+    Serial.println(F("   ⚠️ Note: If you are NOT holding the button, it is shorted to GND (check 4-pin switch orientation!)"));
+  } else {
+    Serial.println(F("HIGH (5V / Idle OK - Ready for press to GND)"));
+  }
+
+  Serial.print(F(" - CLICK  Button (Pin D")); Serial.print(BTN_CLICK_PIN); Serial.print(F("): "));
+  int cVal = digitalRead(BTN_CLICK_PIN);
+  if (cVal == LOW) {
+    Serial.println(F("LOW (0V / PRESSED / SHORTED TO GND)"));
+    Serial.println(F("   ⚠️ Note: If you are NOT holding the button, it is shorted to GND (check 4-pin switch orientation!)"));
+  } else {
+    Serial.println(F("HIGH (5V / Idle OK - Ready for press to GND)"));
+  }
+
+  Serial.print(F(" - OLED Display Present : ")); Serial.println(oledPresent ? F("YES (0x3C/0x3D I2C OK)") : F("NO (I2C Communication Failed)"));
+  Serial.print(F(" - Current UI State     : "));
+  switch (uiState) {
+    case UI_STATE_IDLE: Serial.println(F("IDLE DASHBOARD (0)")); break;
+    case UI_STATE_MENU: Serial.println(F("MAIN MENU (1)")); break;
+    case UI_STATE_QUICK_SMS: Serial.println(F("QUICK SMS (2)")); break;
+    case UI_STATE_INBOX: Serial.println(F("INBOX HISTORY (3)")); break;
+    case UI_STATE_TARGET: Serial.println(F("TARGET NODE (4)")); break;
+    case UI_STATE_SOS_CONFIRM: Serial.println(F("SOS CONFIRM (5)")); break;
+    case UI_STATE_SPLASH: Serial.println(F("SPLASH (6)")); break;
+  }
+  Serial.print(F(" - Battery Voltage      : ")); Serial.print(readBatteryMv()); Serial.println(F(" mV"));
+  Serial.println(F("  Tip: Type 's' to simulate SELECT, 'c' to simulate CLICK"));
+  Serial.println(F("==============================================\n"));
 }
 
 void saveToInbox(const LoRaMeshPacket &pkt, int rssi) {
@@ -665,52 +703,65 @@ void triggerInstantSos() {
 
 // Button 1: SELECT (Cycle menu, next item, scroll inbox)
 void handleSelectButton() {
+  Serial.println(F("\n🔘 [BUTTON EVENT] SELECT (D7) pressed!"));
+  digitalWrite(STATUS_LED_PIN, HIGH);
   playToneBeep(1800, 30);
 
   switch (uiState) {
     case UI_STATE_IDLE:
       uiState = UI_STATE_MENU;
       menuIdx = 0;
+      Serial.println(F("   -> UI State: MAIN MENU (Item 1: Quick SMS)"));
       break;
 
     case UI_STATE_MENU:
       menuIdx = (menuIdx + 1) % 5;
+      Serial.print(F("   -> Menu Item changed: ")); Serial.println(menuIdx + 1);
       break;
 
     case UI_STATE_QUICK_SMS:
       presetIdx = (presetIdx + 1) % PRESET_COUNT;
+      Serial.print(F("   -> Preset SMS selected: #")); Serial.println(presetIdx + 1);
       break;
 
     case UI_STATE_INBOX:
       if (inboxCount > 0) {
         inboxBrowseIdx = (inboxBrowseIdx + 1) % inboxCount;
+        Serial.print(F("   -> Inbox browsing message #")); Serial.println(inboxBrowseIdx + 1);
       }
       break;
 
     case UI_STATE_TARGET:
       targetSelectIdx = (targetSelectIdx + 1) % TARGET_COUNT;
+      Serial.print(F("   -> Target node selected: ")); Serial.println(targetSelectIdx);
       break;
 
     case UI_STATE_SOS_CONFIRM:
     case UI_STATE_SPLASH:
       uiState = UI_STATE_IDLE;
+      Serial.println(F("   -> Cancelled -> Returning to IDLE"));
       break;
   }
 
   updateOledDisplay();
+  digitalWrite(STATUS_LED_PIN, LOW);
 }
 
 // Button 2: CLICK (Enter, Confirm, Send SMS, or Exit Inbox)
 void handleClickButton() {
+  Serial.println(F("\n🔘 [BUTTON EVENT] CLICK (D8) pressed!"));
+  digitalWrite(STATUS_LED_PIN, HIGH);
   playToneBeep(2200, 45);
 
   switch (uiState) {
     case UI_STATE_IDLE:
       uiState = UI_STATE_QUICK_SMS;
       presetIdx = 0;
+      Serial.println(F("   -> Shortcut: IDLE -> QUICK SMS MENU"));
       break;
 
     case UI_STATE_MENU:
+      Serial.print(F("   -> Entered Menu Option: ")); Serial.println(menuIdx + 1);
       switch (menuIdx) {
         case 0:
           uiState = UI_STATE_QUICK_SMS;
@@ -736,6 +787,7 @@ void handleClickButton() {
     case UI_STATE_QUICK_SMS:
       if (presetIdx == PRESET_COUNT - 1) {
         uiState = UI_STATE_IDLE;
+        Serial.println(F("   -> Quick SMS Cancelled -> IDLE"));
       } else {
         char sendBuf[28];
         strcpy_P(sendBuf, (char*)pgm_read_word(&(PRESET_MESSAGES[presetIdx])));
@@ -745,12 +797,14 @@ void handleClickButton() {
         char destBuf[20];
         snprintf(destBuf, sizeof(destBuf), "Sent to #%d", target);
         triggerSplash("SMS BROADCASTED!", destBuf);
+        digitalWrite(STATUS_LED_PIN, LOW);
         return;
       }
       break;
 
     case UI_STATE_INBOX:
       uiState = UI_STATE_IDLE;
+      Serial.println(F("   -> Exited Inbox -> IDLE"));
       break;
 
     case UI_STATE_TARGET:
@@ -758,10 +812,12 @@ void handleClickButton() {
       char setBuf[20];
       snprintf(setBuf, sizeof(setBuf), "Node #%d Active", TARGET_NODE_IDS[currentTargetIdx]);
       triggerSplash("TARGET UPDATED!", setBuf);
+      digitalWrite(STATUS_LED_PIN, LOW);
       return;
 
     case UI_STATE_SOS_CONFIRM:
       triggerInstantSos();
+      digitalWrite(STATUS_LED_PIN, LOW);
       return;
 
     case UI_STATE_SPLASH:
@@ -770,46 +826,61 @@ void handleClickButton() {
   }
 
   updateOledDisplay();
+  digitalWrite(STATUS_LED_PIN, LOW);
 }
 
 // ---- Non-Blocking Push Button Poller ----
 void checkButtons() {
   unsigned long now = millis();
 
-  // 1. SELECT BUTTON (Pin D7) — Active LOW
+  // 1. SELECT BUTTON (Pin D7) — Active LOW (Press to Advance/Cycle)
   static bool prevSelState = HIGH;
-  static unsigned long selDebounceTime = 0;
+  static unsigned long lastSelEdgeTime = 0;
   bool curSelState = digitalRead(BTN_SELECT_PIN);
 
-  if (curSelState == LOW && prevSelState == HIGH && (now - selDebounceTime > 160)) {
-    selDebounceTime = now;
-    handleSelectButton();
+  if (curSelState != prevSelState) {
+    if ((now - lastSelEdgeTime) > 35) { // 35ms debounce filter
+      if (curSelState == LOW) {
+        handleSelectButton();
+      }
+      prevSelState = curSelState;
+      lastSelEdgeTime = now;
+    }
   }
-  prevSelState = curSelState;
 
-  // 2. CLICK BUTTON (Pin D8) — Active LOW with Long-Press SOS Shortcut
+  // 2. CLICK BUTTON (Pin D8) — Active LOW (Short Click = Enter/Send, Hold >1.5s = Instant SOS)
   static bool prevClkState = HIGH;
+  static unsigned long lastClkEdgeTime = 0;
   static unsigned long clkPressStart = 0;
   static bool longPressTriggered = false;
   bool curClkState = digitalRead(BTN_CLICK_PIN);
 
-  if (curClkState == LOW && prevClkState == HIGH) {
-    clkPressStart = now;
-    longPressTriggered = false;
-  } else if (curClkState == LOW && prevClkState == LOW) {
-    if (!longPressTriggered && clkPressStart > 0 && (now - clkPressStart >= 1500)) {
-      longPressTriggered = true;
-      triggerInstantSos();
+  if (curClkState != prevClkState) {
+    if ((now - lastClkEdgeTime) > 35) { // 35ms debounce filter
+      if (curClkState == LOW) {
+        clkPressStart = now;
+        longPressTriggered = false;
+      } else {
+        if (!longPressTriggered && clkPressStart > 0) {
+          unsigned long pressDuration = now - clkPressStart;
+          if (pressDuration >= 15 && pressDuration < 1500) {
+            handleClickButton();
+          }
+        }
+        clkPressStart = 0;
+        longPressTriggered = false;
+      }
+      prevClkState = curClkState;
+      lastClkEdgeTime = now;
     }
-  } else if (curClkState == HIGH && prevClkState == LOW) {
-    unsigned long duration = now - clkPressStart;
-    clkPressStart = 0;
-    if (!longPressTriggered && duration >= 35 && duration < 1500) {
-      handleClickButton();
-    }
-    longPressTriggered = false;
   }
-  prevClkState = curClkState;
+
+  // Check for Long-Press while held down
+  if (curClkState == LOW && !longPressTriggered && clkPressStart > 0 && (now - clkPressStart >= 1500)) {
+    longPressTriggered = true;
+    Serial.println(F("\n🚨 [BUTTON EVENT] LONG-PRESS (>1.5s) on CLICK (D8) -> EMERGENCY SOS!"));
+    triggerInstantSos();
+  }
 }
 
 void printSerialHelp() {
@@ -819,12 +890,15 @@ void printSerialHelp() {
   Serial.println(F("  - Button 1 (Pin D7): SELECT / Next Item / Browse Inbox."));
   Serial.println(F("  - Button 2 (Pin D8): CLICK / Confirm / Send Quick SMS."));
   Serial.println(F("  - Hold Button 2 (1.5s): INSTANT EMERGENCY SOS BROADCAST."));
-  Serial.println(F(" Serial Commands:"));
-  Serial.println(F("  - Type text and hit Enter to broadcast to ALL nodes."));
-  Serial.println(F("  - Type 'text /{node_id}' to send to specific node (e.g., 'Hello /102')."));
-  Serial.println(F("  - Type '/sos <message>' to broadcast an Emergency SOS alert."));
-  Serial.println(F("  - Type '/ping' to send a heartbeat ping."));
-  Serial.println(F("  - Type '/help' to display this menu."));
+  Serial.println(F(" Serial Commands for Interactive Testing:"));
+  Serial.println(F("  - 's' or '/select': Simulate pressing SELECT button (changes screen)."));
+  Serial.println(F("  - 'c' or '/click' : Simulate pressing CLICK button (enters/sends)."));
+  Serial.println(F("  - '/diag' or '/test': Check live pin voltages and OLED status."));
+  Serial.println(F("  - Type text + Enter: Broadcast text message to mesh."));
+  Serial.println(F("  - Type 'text /{node}' (e.g. 'Hello /102') to send direct message."));
+  Serial.println(F("  - '/sos <message>' : Broadcast Emergency SOS alert."));
+  Serial.println(F("  - '/ping'          : Send heartbeat ping."));
+  Serial.println(F("  - '/help'          : Display this menu."));
   Serial.println(F("===========================================\n"));
 }
 
@@ -956,6 +1030,7 @@ void setup() {
 
   playToneBeep(2000, 60);
   printSerialHelp();
+  printPinDiagnostics();
   updateOledDisplay();
 }
 
@@ -994,6 +1069,14 @@ void loop() {
       if (sIdx > 0) {
         if (strcasecmp(serialBuf, "/help") == 0) {
           printSerialHelp();
+        } else if (strcasecmp(serialBuf, "/diag") == 0 || strcasecmp(serialBuf, "/test") == 0) {
+          printPinDiagnostics();
+        } else if (strcasecmp(serialBuf, "/select") == 0 || strcasecmp(serialBuf, "s") == 0 || strcmp(serialBuf, "1") == 0) {
+          Serial.println(F("💻 [SERIAL CLI] Simulated SELECT button!"));
+          handleSelectButton();
+        } else if (strcasecmp(serialBuf, "/click") == 0 || strcasecmp(serialBuf, "c") == 0 || strcmp(serialBuf, "2") == 0) {
+          Serial.println(F("💻 [SERIAL CLI] Simulated CLICK button!"));
+          handleClickButton();
         } else if (strcasecmp(serialBuf, "/ping") == 0) {
           sendWalkieMessage("PING HEARTBEAT", 0, PKT_TYPE_HEARTBEAT, TARGET_NODE_IDS[currentTargetIdx]);
         } else if (strncasecmp(serialBuf, "/sos", 4) == 0) {
