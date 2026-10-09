@@ -76,8 +76,10 @@ const processTelemetry = async (req, res) => {
     // 2. Fetch device schema
     const schemaDoc = await DeviceType.findOne({ device_type: device.device_type });
     
-    // 3. Validate payload fields
-    const payload = req.body;
+    // 3. Validate payload fields — unpack both top-level and nested data/payload wrappers
+    const rawData = (typeof req.body.data === 'object' && req.body.data !== null) ? req.body.data : {};
+    const rawPayload = (typeof req.body.payload === 'object' && req.body.payload !== null) ? req.body.payload : {};
+    const payload = { ...rawData, ...rawPayload, ...req.body };
     const validatedPayload = {};
 
     if (schemaDoc && schemaDoc.fields) {
@@ -108,6 +110,7 @@ const processTelemetry = async (req, res) => {
     if (payload.pressure !== undefined) validatedPayload.pressure = Number(payload.pressure);
     if (payload.altitude !== undefined) validatedPayload.altitude = Number(payload.altitude);
     if (payload.light !== undefined) validatedPayload.light = Number(payload.light);
+    if (payload.rain_tips !== undefined) validatedPayload.rain_tips = Number(payload.rain_tips);
     if (payload.mq3_gas !== undefined) validatedPayload.mq3_gas = Number(payload.mq3_gas);
     if (payload.mq9_gas !== undefined) validatedPayload.mq9_gas = Number(payload.mq9_gas);
     if (payload.battery_mv !== undefined) validatedPayload.battery_mv = Number(payload.battery_mv);
@@ -126,7 +129,72 @@ const processTelemetry = async (req, res) => {
     if (payload.ip_address !== undefined) validatedPayload.ip_address = String(payload.ip_address);
     if (payload.status !== undefined) validatedPayload.status = String(payload.status);
     if (payload.rssi !== undefined) validatedPayload.rssi = Number(payload.rssi);
-    if (payload.rssi !== undefined) validatedPayload.rssi = Number(payload.rssi);
+
+    // =========================================================================
+    // MULTI-TIER DATA LEVELING ENGINE (Battery %, RF Signal, Severity & Indices)
+    // =========================================================================
+    // 1. Battery Voltage Leveling & Percentage (Li-Ion / LiPo curve 3.3V - 4.2V)
+    if (validatedPayload.battery_mv !== undefined) {
+      const mv = validatedPayload.battery_mv;
+      let pct = 0;
+      if (mv >= 4200) pct = 100;
+      else if (mv <= 3300) pct = 0;
+      else pct = Math.round(((mv - 3300) / (4200 - 3300)) * 100);
+      validatedPayload.battery_pct = pct;
+
+      if (pct >= 75) validatedPayload.battery_level = 'GOOD';
+      else if (pct >= 25) validatedPayload.battery_level = 'NORMAL';
+      else if (pct >= 10) validatedPayload.battery_level = 'LOW';
+      else validatedPayload.battery_level = 'CRITICAL';
+    }
+
+    // 2. RF Signal Quality Leveling (LoRa RSSI)
+    if (validatedPayload.rssi !== undefined) {
+      const r = validatedPayload.rssi;
+      if (r >= -75) validatedPayload.signal_level = 'EXCELLENT';
+      else if (r >= -90) validatedPayload.signal_level = 'GOOD';
+      else if (r >= -105) validatedPayload.signal_level = 'FAIR';
+      else validatedPayload.signal_level = 'POOR';
+    }
+
+    // 3. Alert / Severity Level Classification
+    const alertLvl = validatedPayload.alert_level !== undefined ? Number(validatedPayload.alert_level) : 0;
+    const alertNames = ['NORMAL', 'INFO', 'WARNING', 'CRITICAL', 'SOS'];
+    validatedPayload.alert_level_name = alertNames[alertLvl] || 'NORMAL';
+
+    // 4. Wind Speed Beaufort Leveling
+    if (validatedPayload.wind_speed !== undefined) {
+      const ws = validatedPayload.wind_speed;
+      if (ws < 5) validatedPayload.wind_level = 'CALM';
+      else if (ws < 20) validatedPayload.wind_level = 'LIGHT';
+      else if (ws < 38) validatedPayload.wind_level = 'MODERATE';
+      else if (ws < 61) validatedPayload.wind_level = 'STRONG';
+      else validatedPayload.wind_level = 'GALE';
+    }
+
+    // 5. Air Quality & Gas Hazard Leveling
+    if (validatedPayload.mq9_gas !== undefined || validatedPayload.mq3_gas !== undefined) {
+      const gas = Math.max(validatedPayload.mq9_gas || 0, validatedPayload.mq3_gas || 0);
+      if (gas < 250) validatedPayload.air_quality_level = 'CLEAN';
+      else if (gas < 500) validatedPayload.air_quality_level = 'MODERATE';
+      else if (gas < 750) validatedPayload.air_quality_level = 'UNHEALTHY';
+      else validatedPayload.air_quality_level = 'HAZARDOUS';
+    }
+
+    // 6. Heat Index / Feels-like Temperature (°C)
+    if (validatedPayload.temperature !== undefined && validatedPayload.humidity !== undefined) {
+      const T = validatedPayload.temperature;
+      const R = validatedPayload.humidity;
+      if (T >= 20) {
+        const c1 = -8.78469475556, c2 = 1.61139411, c3 = 2.33854883889;
+        const c4 = -0.14611605, c5 = -0.012308094, c6 = -0.0164248277778;
+        const c7 = 0.002211732, c8 = 0.00072546, c9 = -0.000003582;
+        const hi = c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T * T) + (c6 * R * R) + (c7 * T * T * R) + (c8 * T * R * R) + (c9 * T * T * R * R);
+        validatedPayload.heat_index = Number(hi.toFixed(1));
+      } else {
+        validatedPayload.heat_index = T;
+      }
+    }
 
     if (Object.keys(validatedPayload).length === 0) {
       return res.status(400).json({ status: 'error', message: 'Payload contains no valid schema fields' });
@@ -241,6 +309,30 @@ const processTelemetry = async (req, res) => {
         io.emit('new_scale_reading', reading);
       }
       io.emit('new_telemetry', reading);
+
+      // Emit dedicated new_sos_alert if telemetry contains active emergency alert level
+      if (validatedPayload.alert_level > 0 || (validatedPayload.text_msg && /sos|emergency/i.test(validatedPayload.text_msg))) {
+        io.emit('new_sos_alert', {
+          _id: reading._id,
+          source: 'telemetry',
+          source_type: device.device_type === 'weather_station_v1' ? 'Weather Station AWS' : 'Hardware Node',
+          device_id: device.device_id,
+          device_name: device.name,
+          origin_node: validatedPayload.mesh_origin_node || 1,
+          target_node: validatedPayload.target_node || 0,
+          alert_level: validatedPayload.alert_level || 2,
+          alert_level_name: validatedPayload.alert_level_name || (validatedPayload.alert_level > 1 ? 'EMERGENCY SOS' : 'WARNING'),
+          message: validatedPayload.text_msg || `Emergency SOS Alert triggered on ${device.name || device.device_id} (Node #${validatedPayload.mesh_origin_node || 1})`,
+          timestamp: reading.timestamp,
+          battery_mv: validatedPayload.battery_mv,
+          battery_pct: validatedPayload.battery_pct,
+          rssi: validatedPayload.rssi,
+          snr: validatedPayload.snr,
+          temperature: validatedPayload.temperature,
+          wind_speed: validatedPayload.wind_speed,
+          mq9_gas: validatedPayload.mq9_gas
+        });
+      }
 
       if (triggerSession) {
         io.emit('scale_measurement_completed', {
@@ -1224,6 +1316,26 @@ router.post('/messages', async (req, res) => {
           snr: msgData.snr
         }
       });
+
+      // Emit dedicated new_sos_alert if walkie uplink is an SOS or has alert_level > 0
+      if (msgData.alert_level > 0 || msgData.message_type === 'sos') {
+        io.emit('new_sos_alert', {
+          _id: msgData._id,
+          source: 'mesh_message',
+          source_type: 'LoRa Walkie-Talkie',
+          device_id: msgData.device_id,
+          origin_node: msgData.origin_node,
+          target_node: msgData.target_node,
+          alert_level: msgData.alert_level || 2,
+          alert_level_name: msgData.alert_level === 1 ? 'WARNING' : 'EMERGENCY SOS',
+          message: msgData.text,
+          timestamp: msgData.timestamp,
+          battery_mv: msgData.battery_mv,
+          rssi: msgData.rssi,
+          snr: msgData.snr,
+          hops_left: msgData.hops_left
+        });
+      }
     }
 
     res.json({ status: 'success', message: 'Uplink message ingested', msg_id: msgData._id });
@@ -1277,6 +1389,20 @@ router.post('/send-message', async (req, res) => {
     const io = req.app.get('io');
     if (io) {
       io.emit('new_mesh_message', msgData);
+      if (msgData.alert_level > 0 || msgData.message_type === 'sos') {
+        io.emit('new_sos_alert', {
+          _id: msgData._id,
+          source: 'mesh_message',
+          source_type: 'Base Station Broadcast',
+          device_id: 'Cloud Base Station',
+          origin_node: 0,
+          target_node: msgData.target_node,
+          alert_level: msgData.alert_level,
+          alert_level_name: msgData.alert_level === 1 ? 'WARNING' : 'EMERGENCY SOS',
+          message: msgData.text,
+          timestamp: msgData.timestamp
+        });
+      }
     }
 
     res.json({ status: 'success', message: 'Message queued for LoRa Mesh transmission', outbox: outboxItem });
@@ -1292,6 +1418,86 @@ router.post('/send-message', async (req, res) => {
  */
 router.get('/messages/history', (req, res) => {
   res.json({ status: 'success', messages: meshMessageHistory });
+});
+
+/**
+ * @route   GET /v1/devices/sos/history
+ * @desc    Fetch unified Emergency SOS alert history across both Walkies and Weather Station telemetry
+ */
+router.get('/sos/history', async (req, res) => {
+  try {
+    // 1. SOS alerts from LoRa Mesh Walkie-Talkies
+    const meshSos = meshMessageHistory.filter(m => (m.alert_level && m.alert_level > 0) || m.message_type === 'sos').map(m => ({
+      _id: m._id,
+      source: 'mesh_message',
+      source_type: 'LoRa Walkie-Talkie',
+      device_id: m.device_id,
+      origin_node: m.origin_node,
+      target_node: m.target_node,
+      alert_level: m.alert_level || 2,
+      alert_level_name: m.alert_level === 1 ? 'WARNING' : 'EMERGENCY SOS',
+      message: m.text,
+      timestamp: m.timestamp,
+      battery_mv: m.battery_mv,
+      rssi: m.rssi,
+      snr: m.snr,
+      hops_left: m.hops_left
+    }));
+
+    // 2. SOS alerts from MongoDB Reading collection (Weather Stations & Hardware nodes)
+    const telemetrySosDocs = await Reading.find({
+      $or: [
+        { 'payload.alert_level': { $gt: 0 } },
+        { 'payload.text_msg': { $regex: /sos|emergency/i } }
+      ]
+    }).sort({ timestamp: -1 }).limit(100);
+
+    const telemetrySos = telemetrySosDocs.map(r => {
+      const p = r.payload || {};
+      return {
+        _id: r._id,
+        source: 'telemetry',
+        source_type: r.device_type === 'weather_station_v1' ? 'Weather Station AWS' : 'Hardware Node',
+        device_id: r.device_id,
+        origin_node: p.mesh_origin_node !== undefined ? Number(p.mesh_origin_node) : 1,
+        target_node: p.target_node !== undefined ? Number(p.target_node) : 0,
+        alert_level: p.alert_level !== undefined ? Number(p.alert_level) : 1,
+        alert_level_name: p.alert_level_name || (p.alert_level > 1 ? 'EMERGENCY SOS' : 'WARNING'),
+        message: p.text_msg || `Emergency SOS Alert on Station Node #${p.mesh_origin_node || 1}`,
+        timestamp: r.timestamp,
+        battery_mv: p.battery_mv,
+        battery_pct: p.battery_pct,
+        rssi: p.rssi,
+        snr: p.snr,
+        temperature: p.temperature,
+        wind_speed: p.wind_speed,
+        mq9_gas: p.mq9_gas
+      };
+    });
+
+    const combined = [...meshSos, ...telemetrySos];
+    combined.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    // Deduplicate by origin_node and approximate timestamp (within 2 seconds)
+    const seen = new Set();
+    const uniqueSos = [];
+    for (const item of combined) {
+      const key = `${item.origin_node}_${Math.floor(new Date(item.timestamp).getTime() / 2000)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniqueSos.push(item);
+      }
+    }
+
+    res.json({
+      status: 'success',
+      count: uniqueSos.length,
+      alerts: uniqueSos
+    });
+  } catch (err) {
+    console.error('Error fetching SOS history:', err);
+    res.status(500).json({ status: 'error', message: err.message });
+  }
 });
 
 /**
@@ -1332,7 +1538,7 @@ router.post('/outbox/:outboxId/ack', (req, res) => {
  */
 router.get('/telemetry/history', async (req, res) => {
   try {
-    const { range = '3h', device_id, origin_node } = req.query;
+    const { range = '3h', device_id, origin_node, start_date, end_date, limit = 1000 } = req.query;
 
     const filter = {};
     if (device_id && device_id !== 'all') {
@@ -1351,50 +1557,61 @@ router.get('/telemetry/history', async (req, res) => {
       filter['payload.mesh_origin_node'] = Number(origin_node);
     }
 
-    const now = new Date();
-    let startTime = new Date();
+    if (start_date || end_date) {
+      filter.timestamp = {};
+      if (start_date) filter.timestamp.$gte = new Date(start_date);
+      if (end_date) filter.timestamp.$lte = new Date(end_date);
+    } else {
+      const now = new Date();
+      let startTime = new Date();
 
-    switch (range) {
-      case 'live':
-        startTime = new Date(now.getTime() - 15 * 60 * 1000); // last 15 mins
-        break;
-      case '3h':
-        startTime = new Date(now.getTime() - 3 * 60 * 60 * 1000);
-        break;
-      case '6h':
-        startTime = new Date(now.getTime() - 6 * 60 * 60 * 1000);
-        break;
-      case '12h':
-        startTime = new Date(now.getTime() - 12 * 60 * 60 * 1000);
-        break;
-      case '24h':
-      case '1d':
-        startTime = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        break;
-      case '7d':
-      case '1w':
-      case '7w':
-        startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        break;
-      case '30d':
-      case '1m':
-        startTime = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-        break;
-      default:
-        startTime = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+      switch (range) {
+        case 'live':
+          startTime = new Date(now.getTime() - 15 * 60 * 1000); // last 15 mins
+          break;
+        case '1h':
+          startTime = new Date(now.getTime() - 60 * 60 * 1000); // last 1 hr
+          break;
+        case '3h':
+          startTime = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+          break;
+        case '6h':
+          startTime = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+          break;
+        case '12h':
+          startTime = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+          break;
+        case '24h':
+        case '1d':
+          startTime = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+          break;
+        case '7d':
+        case '1w':
+        case '7w':
+          startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+          break;
+        case '30d':
+        case '1m':
+          startTime = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+          break;
+        default:
+          startTime = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+      }
+
+      filter.timestamp = { $gte: startTime };
     }
 
-    filter.timestamp = { $gte: startTime };
+    const queryLimit = Math.min(Math.max(Number(limit) || 1000, 10), 3000);
 
     // Fetch latest readings up to limit (newest first, then reverse for chronological graph order)
     const readingsDesc = await Reading.find(filter)
       .sort({ timestamp: -1 })
-      .limit(1000);
+      .limit(queryLimit);
     const readings = readingsDesc.reverse();
 
     const formatted = readings.map(r => {
       const ts = new Date(r.timestamp);
-      const isLongRange = range === '7d' || range === '1w' || range === '7w' || range === '30d' || range === '1m';
+      const isLongRange = range === '7d' || range === '1w' || range === '7w' || range === '30d' || range === '1m' || !!start_date;
       const timeLabel = isLongRange
         ? `${ts.getMonth()+1}/${ts.getDate()} ${ts.getHours().toString().padStart(2,'0')}:${ts.getMinutes().toString().padStart(2,'0')}`
         : ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: range === 'live' ? '2-digit' : undefined });
@@ -1408,14 +1625,59 @@ router.get('/telemetry/history', async (req, res) => {
         temp: r.payload?.temperature !== undefined ? Number(r.payload.temperature) : null,
         humidity: r.payload?.humidity !== undefined ? Number(r.payload.humidity) : null,
         windSpeed: r.payload?.wind_speed !== undefined ? Number(r.payload.wind_speed) : null,
+        windDirection: r.payload?.wind_direction || 'None',
         mq3Gas: r.payload?.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : (r.payload?.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : null),
         mq9Gas: r.payload?.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : (r.payload?.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : null),
         pressure: r.payload?.pressure !== undefined ? Number(r.payload.pressure) : null,
         altitude: r.payload?.altitude !== undefined ? Number(r.payload.altitude) : (r.payload?.pressure ? Number((44330 * (1 - Math.pow(r.payload.pressure / 101325, 0.1903))).toFixed(1)) : null),
         light: r.payload?.light !== undefined ? Number(r.payload.light) : null,
         batteryMv: r.payload?.battery_mv !== undefined ? Number(r.payload.battery_mv) : null,
+        batteryPct: r.payload?.battery_pct !== undefined ? Number(r.payload.battery_pct) : (r.payload?.battery_mv ? Math.max(0, Math.min(100, Math.round(((r.payload.battery_mv - 3300) / 900) * 100))) : null),
+        batteryLevel: r.payload?.battery_level || null,
+        signalLevel: r.payload?.signal_level || null,
+        alertLevel: r.payload?.alert_level !== undefined ? Number(r.payload.alert_level) : 0,
+        alertLevelName: r.payload?.alert_level_name || 'NORMAL',
+        heatIndex: r.payload?.heat_index !== undefined ? Number(r.payload.heat_index) : (r.payload?.temperature !== undefined ? Number(r.payload.temperature) : null),
+        windLevel: r.payload?.wind_level || null,
+        airQualityLevel: r.payload?.air_quality_level || null,
+        rssi: r.payload?.rssi !== undefined ? Number(r.payload.rssi) : null,
+        snr: r.payload?.snr !== undefined ? Number(r.payload.snr) : null,
       };
     });
+
+    // Calculate aggregate statistics for the timeframe
+    const validTemps = formatted.map(r => r.temp).filter(v => v !== null && !isNaN(v));
+    const validHums = formatted.map(r => r.humidity).filter(v => v !== null && !isNaN(v));
+    const validWinds = formatted.map(r => r.windSpeed).filter(v => v !== null && !isNaN(v));
+    const validPress = formatted.map(r => r.pressure).filter(v => v !== null && !isNaN(v));
+    const validBatts = formatted.map(r => r.batteryMv).filter(v => v !== null && !isNaN(v));
+
+    const stats = {
+      temp: validTemps.length ? {
+        min: Math.min(...validTemps),
+        max: Math.max(...validTemps),
+        avg: Number((validTemps.reduce((a, b) => a + b, 0) / validTemps.length).toFixed(1))
+      } : null,
+      humidity: validHums.length ? {
+        min: Math.min(...validHums),
+        max: Math.max(...validHums),
+        avg: Number((validHums.reduce((a, b) => a + b, 0) / validHums.length).toFixed(1))
+      } : null,
+      windSpeed: validWinds.length ? {
+        max: Math.max(...validWinds),
+        avg: Number((validWinds.reduce((a, b) => a + b, 0) / validWinds.length).toFixed(1))
+      } : null,
+      pressure: validPress.length ? {
+        min: Math.min(...validPress),
+        max: Math.max(...validPress),
+        avg: Math.round(validPress.reduce((a, b) => a + b, 0) / validPress.length)
+      } : null,
+      batteryMv: validBatts.length ? {
+        min: Math.min(...validBatts),
+        max: Math.max(...validBatts),
+        avg: Math.round(validBatts.reduce((a, b) => a + b, 0) / validBatts.length)
+      } : null,
+    };
 
     // Query all distinct active nodes present across the entire time window
     const distinctRaw = await Reading.distinct('payload.mesh_origin_node', filter);
@@ -1425,9 +1687,10 @@ router.get('/telemetry/history', async (req, res) => {
 
     res.json({
       status: 'success',
-      range,
+      range: start_date ? 'custom' : range,
       count: formatted.length,
       activeNodes: activeNodes.length > 0 ? activeNodes : [1],
+      stats,
       readings: formatted
     });
   } catch (error) {

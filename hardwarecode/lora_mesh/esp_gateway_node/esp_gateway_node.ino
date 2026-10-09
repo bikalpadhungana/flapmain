@@ -44,7 +44,7 @@
   #define WIFI_PASSWORD   "Your_WiFi_Password"
   #define AP_SSID         "FlapMain-LoRaGateway-AP"
   #define AP_PASSWORD     "12345678"
-  #define FLAPMAIN_SERVER "http://192.168.1.249:5003"
+  #define FLAPMAIN_SERVER "http://main.esainnovation.com:5003"
   #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"
   #define FLAPMAIN_DEVICE_KEY "flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca"
 #endif
@@ -65,6 +65,7 @@ unsigned long lastPacketReceivedTime = 0;
 uint32_t gatewayReceivedCount = 0;
 
 // ---- Forward Declarations ----
+String buildApiUrl(const String &endpoint);
 String sanitizeJsonString(const char* input);
 void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr);
 void forwardMessageToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr);
@@ -73,6 +74,19 @@ void pollOutboxAndRelay();
 void acknowledgeOutboxDelivered(const String &outboxId);
 String extractJsonString(const String &body, const String &key);
 int extractJsonInt(const String &body, const String &key);
+
+// Helper to construct normalized API URLs (avoids double slashes, handles trailing slashes or /api prefix cleanly)
+String buildApiUrl(const String &endpoint) {
+  String base = String(FLAPMAIN_SERVER);
+  while (base.endsWith("/")) {
+    base = base.substring(0, base.length() - 1);
+  }
+  String ep = endpoint;
+  if (!ep.startsWith("/")) {
+    ep = "/" + ep;
+  }
+  return base + ep;
+}
 
 // ---- Cinematic HTML Local Web Dashboard ----
 String getHTML() {
@@ -407,7 +421,7 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   WiFiClient client;
   HTTPClient http;
 
-  String url = String(FLAPMAIN_SERVER) + "/v1/devices/data";
+  String url = buildApiUrl("/v1/devices/data");
 
   if (String(FLAPMAIN_SERVER).startsWith("https")) {
     secureClient.setInsecure();
@@ -464,10 +478,12 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
 
   int httpCode = http.POST(postData);
 
-  if (httpCode > 0) {
+  if (httpCode >= 200 && httpCode < 300) {
     Serial.printf("[Cloud Forward] Success | HTTP %d\n", httpCode);
+  } else if (httpCode > 0) {
+    Serial.printf("[Cloud Forward] HTTP Error: %d\n", httpCode);
   } else {
-    Serial.printf("[Cloud Forward] Failed | Error: %s\n", http.errorToString(httpCode).c_str());
+    Serial.printf("[Cloud Forward] Connect Failed | Error: %s\n", http.errorToString(httpCode).c_str());
   }
 
   http.end();
@@ -484,7 +500,7 @@ void handleUplinkPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
 void forwardMessageToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   WiFiClient client;
   HTTPClient http;
-  String url = String(FLAPMAIN_SERVER) + "/v1/devices/messages";
+  String url = buildApiUrl("/v1/devices/messages");
 
   if (String(FLAPMAIN_SERVER).startsWith("https")) {
     secureClient.setInsecure();
@@ -517,10 +533,12 @@ void forwardMessageToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   Serial.print("[Msg Uplink] POST "); Serial.println(url);
   int httpCode = http.POST(postData);
 
-  if (httpCode > 0) {
+  if (httpCode >= 200 && httpCode < 300) {
     Serial.printf("[Msg Uplink] Success | HTTP %d\n", httpCode);
+  } else if (httpCode > 0) {
+    Serial.printf("[Msg Uplink] HTTP Error: %d\n", httpCode);
   } else {
-    Serial.printf("[Msg Uplink] Failed | %s\n", http.errorToString(httpCode).c_str());
+    Serial.printf("[Msg Uplink] Connect Failed | %s\n", http.errorToString(httpCode).c_str());
   }
   http.end();
 }
@@ -573,7 +591,7 @@ void acknowledgeOutboxDelivered(const String &outboxId) {
 
   WiFiClient client;
   HTTPClient http;
-  String url = String(FLAPMAIN_SERVER) + "/v1/devices/outbox/" + outboxId + "/ack";
+  String url = buildApiUrl("/v1/devices/outbox/" + outboxId + "/ack");
 
   if (String(FLAPMAIN_SERVER).startsWith("https")) {
     secureClient.setInsecure();
@@ -591,7 +609,7 @@ void pollOutboxAndRelay() {
 
   WiFiClient client;
   HTTPClient http;
-  String url = String(FLAPMAIN_SERVER) + "/v1/devices/" + String(FLAPMAIN_DEVICE_ID) + "/outbox";
+  String url = buildApiUrl("/v1/devices/" + String(FLAPMAIN_DEVICE_ID) + "/outbox");
 
   if (String(FLAPMAIN_SERVER).startsWith("https")) {
     secureClient.setInsecure();

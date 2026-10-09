@@ -14,8 +14,10 @@
 #define AP_SSID         "FlapMain-LoRaGateway-AP"
 #define AP_PASSWORD     "12345678"
 
-// ---- FlapMain Cloud API Configuration ----
-#define FLAPMAIN_SERVER    "https://main.esainnovation.com/api"
+// ---- FlapMain Server API Target ----
+// • Live VPS Host:  "http://main.esainnovation.com:5003" (FlapMain API is on port 5003)
+// • Local Dev Host: "http://192.168.1.XX:5003"
+#define FLAPMAIN_SERVER    "http://main.esainnovation.com:5003"
 #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"
 #define FLAPMAIN_DEVICE_KEY "flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca"
 

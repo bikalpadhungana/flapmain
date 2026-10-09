@@ -82,6 +82,14 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
+// Normalize double slashes in URLs from embedded devices
+app.use((req, res, next) => {
+  if (req.url && req.url.includes('//')) {
+    req.url = req.url.replace(/\/+/g, '/');
+  }
+  next();
+});
+
 // Swagger Docs Route
 app.use('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
@@ -89,6 +97,7 @@ app.use('/api/v1/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/devices', deviceRoutes);
 app.use('/v1/devices', deviceRoutes);
+app.use('/api/devices', deviceRoutes);
 app.use('/api/v1/device-types', deviceTypeRoutes);
 app.use('/api/v1/api-keys', apiKeyRoutes);
 app.use('/api/v1/alerts/rules', alertRuleRoutes);

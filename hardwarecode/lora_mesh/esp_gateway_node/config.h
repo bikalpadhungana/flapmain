@@ -9,16 +9,17 @@
 #define CONFIG_H
 
 // ---- Wi-Fi Station Credentials ----
-#define WIFI_SSID       "Your_WiFi_SSID"      // Replace with your local WiFi network name
-#define WIFI_PASSWORD   "Your_WiFi_Password"  // Replace with your local WiFi password
+#define WIFI_SSID       "ALHN-334A"      // Replace with your local WiFi network name
+#define WIFI_PASSWORD   "vRY79KAwK9"  // Replace with your local WiFi password
 
 // ---- Hotspot AP Fallback Credentials ----
 #define AP_SSID         "FlapMain-LoRaGateway-AP"
 #define AP_PASSWORD     "12345678"
 
-// ---- FlapMain Main Local Server API Target ----
-// Configure to your machine's local IP address and port (Backend port: 5003)
-#define FLAPMAIN_SERVER    "http://192.168.1.249:5003"   // Main Local Server Target (Port 5003)
+// ---- FlapMain Server API Target ----
+// • Live VPS Host:  "http://main.esainnovation.com:5003" (FlapMain API is on port 5003)
+// • Local Dev Host: "http://192.168.1.64:5003"
+#define FLAPMAIN_SERVER    "http://main.esainnovation.com:5003"
 #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"      // Target Device ID for telemetry ingestion
 #define FLAPMAIN_DEVICE_KEY "flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca"
 
