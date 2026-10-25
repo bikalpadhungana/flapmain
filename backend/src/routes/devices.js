@@ -111,6 +111,18 @@ const processTelemetry = async (req, res) => {
     if (payload.altitude !== undefined) validatedPayload.altitude = Number(payload.altitude);
     if (payload.light !== undefined) validatedPayload.light = Number(payload.light);
     if (payload.rain_tips !== undefined) validatedPayload.rain_tips = Number(payload.rain_tips);
+    if (payload.rain_mm !== undefined) validatedPayload.rain_mm = Number(payload.rain_mm);
+    if (payload.rainfall !== undefined) validatedPayload.rainfall = Number(payload.rainfall);
+
+    // Auto-extract rainfall if payload text_msg contains "RAIN:xx.xx"
+    if (payload.text_msg && typeof payload.text_msg === 'string' && payload.text_msg.startsWith('RAIN:')) {
+      const parsedRain = parseFloat(payload.text_msg.slice(5));
+      if (!isNaN(parsedRain)) {
+        if (validatedPayload.rain_tips === undefined) validatedPayload.rain_tips = parsedRain;
+        if (validatedPayload.rain_mm === undefined) validatedPayload.rain_mm = parsedRain;
+      }
+    }
+
     if (payload.mq3_gas !== undefined) validatedPayload.mq3_gas = Number(payload.mq3_gas);
     if (payload.mq9_gas !== undefined) validatedPayload.mq9_gas = Number(payload.mq9_gas);
     if (payload.battery_mv !== undefined) validatedPayload.battery_mv = Number(payload.battery_mv);
@@ -1549,7 +1561,9 @@ router.get('/telemetry/history', async (req, res) => {
         { device_type: 'weather_station_v1' },
         { 'payload.wind_speed': { $exists: true } },
         { 'payload.temperature': { $exists: true } },
-        { 'payload.mesh_origin_node': { $exists: true } }
+        { 'payload.mesh_origin_node': { $exists: true } },
+        { 'payload.rain_tips': { $exists: true } },
+        { 'payload.rain_mm': { $exists: true } }
       ];
     }
 
@@ -1626,6 +1640,8 @@ router.get('/telemetry/history', async (req, res) => {
         humidity: r.payload?.humidity !== undefined ? Number(r.payload.humidity) : null,
         windSpeed: r.payload?.wind_speed !== undefined ? Number(r.payload.wind_speed) : null,
         windDirection: r.payload?.wind_direction || 'None',
+        rainTips: r.payload?.rain_tips !== undefined ? Number(r.payload.rain_tips) : (r.payload?.rain_mm !== undefined ? Number(r.payload.rain_mm) : (r.payload?.rainfall !== undefined ? Number(r.payload.rainfall) : null)),
+        rainMm: r.payload?.rain_mm !== undefined ? Number(r.payload.rain_mm) : (r.payload?.rain_tips !== undefined ? Number(r.payload.rain_tips) : (r.payload?.rainfall !== undefined ? Number(r.payload.rainfall) : null)),
         mq3Gas: r.payload?.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : (r.payload?.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : null),
         mq9Gas: r.payload?.mq9_gas !== undefined ? Number(r.payload.mq9_gas) : (r.payload?.mq3_gas !== undefined ? Number(r.payload.mq3_gas) : null),
         pressure: r.payload?.pressure !== undefined ? Number(r.payload.pressure) : null,
@@ -1651,6 +1667,7 @@ router.get('/telemetry/history', async (req, res) => {
     const validWinds = formatted.map(r => r.windSpeed).filter(v => v !== null && !isNaN(v));
     const validPress = formatted.map(r => r.pressure).filter(v => v !== null && !isNaN(v));
     const validBatts = formatted.map(r => r.batteryMv).filter(v => v !== null && !isNaN(v));
+    const validRains = formatted.map(r => r.rainMm).filter(v => v !== null && !isNaN(v));
 
     const stats = {
       temp: validTemps.length ? {
@@ -1662,6 +1679,12 @@ router.get('/telemetry/history', async (req, res) => {
         min: Math.min(...validHums),
         max: Math.max(...validHums),
         avg: Number((validHums.reduce((a, b) => a + b, 0) / validHums.length).toFixed(1))
+      } : null,
+      rain: validRains.length ? {
+        min: Math.min(...validRains),
+        max: Math.max(...validRains),
+        avg: Number((validRains.reduce((a, b) => a + b, 0) / validRains.length).toFixed(2)),
+        latest: validRains[validRains.length - 1]
       } : null,
       windSpeed: validWinds.length ? {
         max: Math.max(...validWinds),

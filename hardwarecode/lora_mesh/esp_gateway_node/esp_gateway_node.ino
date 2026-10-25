@@ -143,6 +143,7 @@ String getHTML() {
       <div class="metric-item"><span class="metric-label">Mesh Origin Node</span><span class="metric-val" id="originNode">--</span></div>
       <div class="metric-item"><span class="metric-label">AWS Battery Voltage</span><span class="metric-val" id="battery">--</span></div>
       <div class="metric-item"><span class="metric-label">LoRa RSSI / SNR</span><span class="metric-val" id="rfStats">--</span></div>
+      <div class="metric-item"><span class="metric-label">Rainfall</span><span class="metric-val" id="rainVal">0.00 mm</span></div>
       <div class="metric-item"><span class="metric-label">Gateway Received</span><span class="metric-val" id="rxCount">0 Packets</span></div>
     </div>
   </div>
@@ -169,6 +170,9 @@ String getHTML() {
         document.getElementById('mq3Gas').innerText = data.mq3_gas;
         document.getElementById('originNode').innerText = "Node #" + data.origin_node + " (Hops left: " + data.hops_left + ")";
         document.getElementById('battery').innerText = data.battery_mv + " mV";
+        if (data.rain_mm !== undefined) {
+          document.getElementById('rainVal').innerText = data.rain_mm.toFixed(2) + " mm";
+        }
         document.getElementById('rfStats').innerText = data.rssi + " dBm / " + data.snr + " dB";
         document.getElementById('rxCount').innerText = data.total_packets + " Packets";
 
@@ -210,7 +214,7 @@ void processMeshPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
     Serial.printf(" - Origin Node ID  : #%u\n", pkt.originNode);
     Serial.printf(" - Target Node ID  : #%u (%s)\n", pkt.targetNode, pkt.targetNode == 0 ? "BROADCAST" : "DIRECT");
     Serial.printf(" - Packet Type     : %s (%d)\n", pkt.packetType == PKT_TYPE_SOS ? "EMERGENCY SOS" : (pkt.packetType == PKT_TYPE_TEXT ? "WALKIE TEXT" : "WEATHER TELEMETRY"), pkt.packetType);
-    Serial.printf(" - Expected Size   : %d bytes | Struct Size: %d bytes\n", 56, (int)sizeof(LoRaMeshPacket));
+    Serial.printf(" - Expected Size   : %d bytes | Struct Size: %d bytes\n", (int)sizeof(LoRaMeshPacket), (int)sizeof(LoRaMeshPacket));
     Serial.printf(" - TTL (Hops Left) : %d\n", pkt.ttl);
     if (pkt.text_msg[0] != '\0') {
       Serial.printf(" - Text Message    : \"%s\"\n", pkt.text_msg);
@@ -225,6 +229,8 @@ void processMeshPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
     Serial.printf(" - Light ADC       : %u\n", pkt.light_val);
     Serial.printf(" - MQ-9 Gas ADC    : %u\n", pkt.mq3_gas);
     Serial.printf(" - AWS Battery     : %u mV\n", pkt.battery_mv);
+    float rainVal = (pkt.rain_mm_x100 > 0) ? (pkt.rain_mm_x100 / 100.0f) : (strncmp(pkt.text_msg, "RAIN:", 5) == 0 ? atof(pkt.text_msg + 5) : 0.0f);
+    Serial.printf(" - Rainfall Total  : %.2f mm\n", rainVal);
     Serial.printf(" - Alert Level     : %u\n", pkt.alert_level);
     Serial.printf(" - Signal RSSI     : %d dBm\n", lastRssi);
     Serial.printf(" - Signal SNR      : %.1f dB\n", lastSnr);
@@ -348,6 +354,8 @@ void setup() {
       json += "\"light\":" + String(latestPkt.light_val) + ",";
       json += "\"mq9_gas\":" + String(latestPkt.mq3_gas) + ",";
       json += "\"mq3_gas\":" + String(latestPkt.mq3_gas) + ",";
+      float rainVal = (latestPkt.rain_mm_x100 > 0) ? (latestPkt.rain_mm_x100 / 100.0f) : (strncmp(latestPkt.text_msg, "RAIN:", 5) == 0 ? atof(latestPkt.text_msg + 5) : 0.0f);
+      json += "\"rain_mm\":" + String(rainVal, 2) + ",";
       json += "\"text_msg\":\"" + sanitizeJsonString(latestPkt.text_msg) + "\",";
       json += "\"battery_mv\":" + String(latestPkt.battery_mv) + ",";
       json += "\"alert_level\":" + String(latestPkt.alert_level) + ",";
@@ -462,6 +470,9 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   postData += "\"mq9_gas\":" + String(pkt.mq3_gas) + ",";
   postData += "\"mq3_gas\":" + String(pkt.mq3_gas) + ",";
   postData += "\"text_msg\":\"" + sanitizeJsonString(pkt.text_msg) + "\",";
+  float rainVal = (pkt.rain_mm_x100 > 0) ? (pkt.rain_mm_x100 / 100.0f) : (strncmp(pkt.text_msg, "RAIN:", 5) == 0 ? atof(pkt.text_msg + 5) : 0.0f);
+  postData += "\"rain_tips\":" + String(rainVal, 2) + ",";
+  postData += "\"rain_mm\":" + String(rainVal, 2) + ",";
   postData += "\"pressure\":" + String(pkt.pressure_pa) + ",";
   postData += "\"altitude\":" + String(altitude, 2) + ",";
   postData += "\"battery_mv\":" + String(pkt.battery_mv) + ",";

@@ -3,7 +3,8 @@ import {
   CloudSun, Wind, Thermometer, Droplets, Gauge, Compass, Sun, Radio, RefreshCw, 
   Wifi, Activity, Clock, Flame, Battery, ShieldAlert, Cpu, BarChart2, AlertTriangle, ArrowRight,
   Layers, CheckCircle2, AlertCircle, Signal, Download, Table as TableIcon, Calendar, Search, 
-  ChevronLeft, ChevronRight, FileText, Database, Filter, Eye, SlidersHorizontal, Sparkles, X, Copy, Check
+  ChevronLeft, ChevronRight, FileText, Database, Filter, Eye, SlidersHorizontal, Sparkles, X, Copy, Check,
+  CloudRain
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { API_BASE_URL } from '../config';
@@ -38,6 +39,7 @@ const METRIC_VIEWS = [
   { id: 'all', label: '📊 All Sensors' },
   { id: 'temp_hum', label: '🌡️ Temp & Humidity' },
   { id: 'wind_press', label: '💨 Wind & Pressure' },
+  { id: 'rain', label: '🌧️ Rainfall' },
   { id: 'mq9', label: '🔥 MQ-9 Gas' },
   { id: 'batt_light', label: '🔋 Battery & Light' }
 ];
@@ -67,6 +69,8 @@ const createInitialNode = (nodeId = 1) => ({
   light: null,
   mq9Gas: null,
   mq3Gas: null,
+  rainMm: 0.0,
+  rainTips: 0,
   batteryMv: null,
   meshOriginNode: Number(nodeId),
   meshHopsLeft: null,
@@ -171,6 +175,8 @@ const WeatherMonitor = () => {
                   windSpeed: r.windSpeed !== null ? r.windSpeed : updated[rNode].windSpeed,
                   mq9Gas: r.mq9Gas !== null ? r.mq9Gas : updated[rNode].mq9Gas,
                   mq3Gas: r.mq3Gas !== null ? r.mq3Gas : updated[rNode].mq3Gas,
+                  rainMm: r.rainMm !== null && r.rainMm !== undefined ? r.rainMm : (r.rainTips !== null && r.rainTips !== undefined ? r.rainTips : updated[rNode].rainMm),
+                  rainTips: r.rainTips !== null && r.rainTips !== undefined ? r.rainTips : (r.rainMm !== null && r.rainMm !== undefined ? r.rainMm : updated[rNode].rainTips),
                   pressure: r.pressure !== null ? r.pressure : updated[rNode].pressure,
                   altitude: r.altitude !== null ? r.altitude : updated[rNode].altitude,
                   light: r.light !== null ? r.light : updated[rNode].light,
@@ -204,6 +210,7 @@ const WeatherMonitor = () => {
     const validPress = chartData.map(r => r.pressure).filter(v => v !== null && v !== undefined && !isNaN(v));
     const validBatts = chartData.map(r => r.batteryMv).filter(v => v !== null && v !== undefined && !isNaN(v));
     const validGas = chartData.map(r => r.mq9Gas ?? r.mq3Gas).filter(v => v !== null && v !== undefined && !isNaN(v));
+    const validRains = chartData.map(r => r.rainMm ?? r.rainTips).filter(v => v !== null && v !== undefined && !isNaN(v));
 
     const timestamps = chartData.map(r => new Date(r.timestamp || 0).getTime()).filter(t => t > 0);
     const minTs = timestamps.length ? new Date(Math.min(...timestamps)) : null;
@@ -222,6 +229,12 @@ const WeatherMonitor = () => {
         min: Math.min(...validHums),
         max: Math.max(...validHums),
         avg: Number((validHums.reduce((a, b) => a + b, 0) / validHums.length).toFixed(1))
+      } : null,
+      rain: validRains.length ? {
+        min: Math.min(...validRains),
+        max: Math.max(...validRains),
+        avg: Number((validRains.reduce((a, b) => a + b, 0) / validRains.length).toFixed(2)),
+        latest: validRains[validRains.length - 1]
       } : null,
       windSpeed: validWinds.length ? {
         min: Math.min(...validWinds),
@@ -302,6 +315,7 @@ const WeatherMonitor = () => {
       'Humidity_Pct',
       'Wind_Speed_kmh',
       'Wind_Direction',
+      'Rainfall_mm',
       'Barometric_Pressure_Pa',
       'Altitude_m',
       'MQ9_Gas_ADC',
@@ -325,6 +339,7 @@ const WeatherMonitor = () => {
         r.humidity !== null && r.humidity !== undefined ? r.humidity : '',
         r.windSpeed !== null && r.windSpeed !== undefined ? r.windSpeed : '',
         `"${r.windDirection || 'None'}"`,
+        r.rainMm !== null && r.rainMm !== undefined ? r.rainMm : (r.rainTips !== null && r.rainTips !== undefined ? r.rainTips : ''),
         r.pressure !== null && r.pressure !== undefined ? r.pressure : '',
         r.altitude !== null && r.altitude !== undefined ? r.altitude : '',
         r.mq9Gas ?? r.mq3Gas ?? '',
@@ -406,13 +421,14 @@ const WeatherMonitor = () => {
         const payload = reading.payload || {};
         const deviceId = reading.device_id;
 
-        const hasWeather = payload.wind_speed !== undefined || payload.wind_direction !== undefined || payload.temperature !== undefined || payload.mq9_gas !== undefined || payload.mq3_gas !== undefined;
+        const hasWeather = payload.wind_speed !== undefined || payload.wind_direction !== undefined || payload.temperature !== undefined || payload.mq9_gas !== undefined || payload.mq3_gas !== undefined || payload.rain_tips !== undefined || payload.rain_mm !== undefined || payload.rainfall !== undefined;
         if (!hasWeather) return;
 
         const originNode = payload.mesh_origin_node !== undefined ? Number(payload.mesh_origin_node) : 1;
         const ts = new Date(reading.timestamp || Date.now());
         const timeLabel = ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const gasVal = payload.mq9_gas !== undefined ? Number(payload.mq9_gas) : (payload.mq3_gas !== undefined ? Number(payload.mq3_gas) : null);
+        const rainVal = payload.rain_mm !== undefined ? Number(payload.rain_mm) : (payload.rain_tips !== undefined ? Number(payload.rain_tips) : (payload.rainfall !== undefined ? Number(payload.rainfall) : null));
 
         // Update Multi-Station Map
         setNodesMap(prev => {
@@ -431,6 +447,8 @@ const WeatherMonitor = () => {
               light: payload.light !== undefined ? Number(payload.light) : existing.light,
               mq9Gas: gasVal,
               mq3Gas: gasVal,
+              rainMm: rainVal !== null ? rainVal : existing.rainMm,
+              rainTips: payload.rain_tips !== undefined ? Number(payload.rain_tips) : existing.rainTips,
               batteryMv: payload.battery_mv !== undefined ? Number(payload.battery_mv) : existing.batteryMv,
               meshOriginNode: originNode,
               meshHopsLeft: payload.mesh_hops_left !== undefined ? Number(payload.mesh_hops_left) : existing.meshHopsLeft,
@@ -469,6 +487,8 @@ const WeatherMonitor = () => {
                 temp: payload.temperature !== undefined ? Number(payload.temperature) : null,
                 humidity: payload.humidity !== undefined ? Number(payload.humidity) : null,
                 windSpeed: payload.wind_speed !== undefined ? Number(payload.wind_speed) : null,
+                rainMm: rainVal,
+                rainTips: payload.rain_tips !== undefined ? Number(payload.rain_tips) : null,
                 mq9Gas: gasVal,
                 mq3Gas: gasVal,
                 pressure: payload.pressure !== undefined ? Number(payload.pressure) : null,
@@ -762,6 +782,17 @@ const WeatherMonitor = () => {
                       {node.batteryMv !== null ? `${node.batteryMv} mV` : '--'}
                     </div>
                   </div>
+
+                  {/* Rainfall Mini Indicator */}
+                  <div style={{ background: 'var(--bg-app)', padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border-subtle)', gridColumn: 'span 2' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#06b6d4', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><CloudRain size={14} /> Rainfall Accumulation</span>
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>Pin A6 (0.173 mm/tip)</span>
+                    </div>
+                    <div style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--text-main)', marginTop: 4 }}>
+                      {node.rainMm !== null && node.rainMm !== undefined ? `${Number(node.rainMm).toFixed(2)} mm` : '0.00 mm'}
+                    </div>
+                  </div>
                 </div>
 
                 {/* Footer and Inspect Button */}
@@ -928,6 +959,29 @@ const WeatherMonitor = () => {
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 4 }}>
               Atmospheric Moisture
+            </div>
+          </div>
+
+          {/* Rainfall Sensor */}
+          <div className="card" style={{ padding: 18, background: 'var(--bg-surface)', border: '1px solid var(--border-strong)', borderRadius: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#06b6d4', fontSize: '0.8rem', fontWeight: 700, textTransform: 'uppercase' }}>
+                <CloudRain size={16} /> Rainfall Gauge
+              </div>
+              <span style={{
+                fontSize: '0.68rem', fontWeight: 800, padding: '2px 8px', borderRadius: 8,
+                color: (weatherData.rainMm > 0 || weatherData.rainTips > 0) ? '#06b6d4' : 'var(--text-muted)',
+                background: (weatherData.rainMm > 0 || weatherData.rainTips > 0) ? 'rgba(6, 182, 212, 0.15)' : 'var(--bg-app)',
+                border: `1px solid ${(weatherData.rainMm > 0 || weatherData.rainTips > 0) ? '#06b6d4' : 'var(--border-subtle)'}`
+              }}>
+                {(weatherData.rainMm > 0 || weatherData.rainTips > 0) ? 'RAIN DETECTED' : 'NO RAIN'}
+              </span>
+            </div>
+            <div style={{ fontSize: '2rem', fontWeight: 900, color: 'var(--text-main)', marginTop: 8 }}>
+              {weatherData.rainMm !== null && weatherData.rainMm !== undefined ? `${Number(weatherData.rainMm).toFixed(2)} mm` : (weatherData.rainTips !== null && weatherData.rainTips !== undefined ? `${Number(weatherData.rainTips).toFixed(2)} mm` : '0.00 mm')}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 4 }}>
+              Tipping Bucket Gauge (Pin A6 • 0.173 mm/pulse)
             </div>
           </div>
 
@@ -1361,6 +1415,19 @@ const WeatherMonitor = () => {
               </div>
             </div>
 
+            {/* Rainfall Stats */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#06b6d4', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase' }}>
+                <CloudRain size={14} /> Rainfall Total
+              </div>
+              <div style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                {computedStats.rain ? `${computedStats.rain.max.toFixed(2)} mm` : '0.00 mm'}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                {computedStats.rain && computedStats.rain.max > 0 ? `Max: ${computedStats.rain.max.toFixed(2)} mm` : 'No rainfall recorded'}
+              </div>
+            </div>
+
             {/* Pressure Stats */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#8b5cf6', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase' }}>
@@ -1473,6 +1540,9 @@ const WeatherMonitor = () => {
                     )}
                     {(chartMetricView === 'all' || chartMetricView === 'wind_press') && (
                       <Line yAxisId="right" type="monotone" dataKey="windSpeed" name="Wind Speed (km/h)" stroke="#10b981" strokeWidth={2.5} dot={false} />
+                    )}
+                    {(chartMetricView === 'all' || chartMetricView === 'rain') && (
+                      <Line yAxisId="right" type="monotone" dataKey="rainMm" name="Rainfall (mm)" stroke="#06b6d4" strokeWidth={2.5} dot={false} />
                     )}
                     {(chartMetricView === 'all' || chartMetricView === 'mq9' || chartMetricView === 'mq3') && (
                       <Line yAxisId="right" type="monotone" dataKey="mq9Gas" name="MQ-9 Gas (ADC)" stroke="#ef4444" strokeWidth={2} dot={false} />
@@ -1637,6 +1707,7 @@ const WeatherMonitor = () => {
                     <th style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>Humidity (%)</th>
                     <th style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>Wind Speed</th>
                     <th style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>Direction</th>
+                    <th style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>Rainfall (mm)</th>
                     <th style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>Pressure (Pa)</th>
                     <th style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>Altitude</th>
                     <th style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>Air Quality (MQ-9)</th>
@@ -1649,7 +1720,7 @@ const WeatherMonitor = () => {
                 <tbody>
                   {currentPageData.length === 0 ? (
                     <tr>
-                      <td colSpan={13} style={{ padding: '30px 14px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                      <td colSpan={14} style={{ padding: '30px 14px', textAlign: 'center', color: 'var(--text-muted)' }}>
                         No records match the current filter or search criteria.
                       </td>
                     </tr>
@@ -1710,6 +1781,11 @@ const WeatherMonitor = () => {
                           {/* Direction */}
                           <td style={{ padding: '10px 14px', whiteSpace: 'nowrap', color: 'var(--text-dim)' }}>
                             {row.windDirection && row.windDirection !== 'None' ? row.windDirection : 'CALM'}
+                          </td>
+
+                          {/* Rainfall */}
+                          <td style={{ padding: '10px 14px', whiteSpace: 'nowrap', fontWeight: 700, color: (row.rainMm > 0 || row.rainTips > 0) ? '#06b6d4' : 'var(--text-muted)' }}>
+                            {row.rainMm !== null && row.rainMm !== undefined ? `${Number(row.rainMm).toFixed(2)} mm` : (row.rainTips !== null && row.rainTips !== undefined ? `${Number(row.rainTips).toFixed(2)} mm` : '0.00 mm')}
                           </td>
 
                           {/* Pressure */}
@@ -1918,6 +1994,13 @@ const WeatherMonitor = () => {
                     {selectedInspectionRecord.windSpeed !== null ? `${selectedInspectionRecord.windSpeed.toFixed(1)} km/h` : '0 km/h'}
                   </div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{selectedInspectionRecord.windDirection || 'None'}</div>
+                </div>
+
+                <div style={{ background: 'var(--bg-app)', padding: '10px 12px', borderRadius: 10 }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Rainfall Accumulation</div>
+                  <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#06b6d4' }}>
+                    {selectedInspectionRecord.rainMm !== null && selectedInspectionRecord.rainMm !== undefined ? `${Number(selectedInspectionRecord.rainMm).toFixed(2)} mm` : (selectedInspectionRecord.rainTips !== null && selectedInspectionRecord.rainTips !== undefined ? `${Number(selectedInspectionRecord.rainTips).toFixed(2)} mm` : '0.00 mm')}
+                  </div>
                 </div>
 
                 <div style={{ background: 'var(--bg-app)', padding: '10px 12px', borderRadius: 10 }}>

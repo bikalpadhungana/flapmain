@@ -75,6 +75,7 @@ struct __attribute__((packed)) LoRaMeshPacket {
   uint16_t light_val;      // Light intensity raw ADC (0..1023)
   uint16_t battery_mv;     // Battery voltage in millivolts (e.g. 3850 mV)
   uint16_t mq3_gas;        // MQ-3 Gas / Alcohol Sensor ADC (0..1023)
+  uint16_t rain_mm_x100;   // Cumulative rainfall in mm * 100 (e.g. 173 = 1.73 mm)
   uint8_t  alert_level;    // 0 = Normal, 1 = Warning, 2 = Critical Emergency SOS
   char     text_msg[32];   // Walkie-Talkie / Emergency Text Message (null-terminated)
 };
