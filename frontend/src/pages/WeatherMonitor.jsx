@@ -56,32 +56,44 @@ const getDefaultEndDate = () => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
-const createInitialNode = (nodeId = 1) => ({
-  nodeId: Number(nodeId),
-  deviceId: Number(nodeId) === 1 ? 'flap-flap-aws-001-7zhj' : `flap-flap-aws-${String(nodeId).padStart(3, '0')}-node`,
-  displayName: Number(nodeId) === 1 ? 'AWS Node #1 (Primary)' : `AWS Node #${nodeId} (Station ${nodeId})`,
-  windSpeed: 0.0,
-  windDirection: 'None',
-  temperature: null,
-  humidity: null,
-  pressure: null,
-  altitude: null,
-  light: null,
-  mq9Gas: null,
-  mq3Gas: null,
-  rainMm: 0.0,
-  rainTips: 0,
-  batteryMv: null,
-  meshOriginNode: Number(nodeId),
-  meshHopsLeft: null,
-  alertLevel: 0,
-  snr: null,
-  time: null,
-  apBssid: null,
-  rssi: null,
-  lastSeen: null,
-  online: false
-});
+const KNOWN_STATIONS = {
+  1: { name: 'Manung Dada Weather Station (Node #1)', location: 'Manung Dada', deviceId: 'flap-flap-aws-001-7zhj' },
+  2: { name: 'Damauli Bazar Weather Station (Node #2)', location: 'Damauli Bazar', deviceId: 'flap-flap-aws-002-node' },
+  3: { name: 'Kalupada Dada Kathmandu Weather Station (Node #3)', location: 'Kalupada Dada Kathmandu', deviceId: 'flap-flap-aws-003-node' },
+  4: { name: 'Chandragiri Hill Kathmandu Weather Station (Node #4)', location: 'Chandragiri Hill Kathmandu', deviceId: 'flap-flap-aws-004-node' }
+};
+
+const createInitialNode = (nodeId = 1, meta = {}) => {
+  const numId = Number(nodeId);
+  const known = KNOWN_STATIONS[numId] || {};
+  return {
+    nodeId: numId,
+    deviceId: meta.deviceId || known.deviceId || (numId === 1 ? 'flap-flap-aws-001-7zhj' : `flap-flap-aws-${String(numId).padStart(3, '0')}-node`),
+    displayName: meta.name || known.name || `AWS Node #${numId} (Station ${numId})`,
+    location: meta.location || known.location || `Station Site #${numId}`,
+    windSpeed: 0.0,
+    windDirection: 'None',
+    temperature: null,
+    humidity: null,
+    pressure: null,
+    altitude: null,
+    light: null,
+    mq9Gas: null,
+    mq3Gas: null,
+    rainMm: 0.0,
+    rainTips: 0,
+    batteryMv: null,
+    meshOriginNode: numId,
+    meshHopsLeft: null,
+    alertLevel: 0,
+    snr: null,
+    time: null,
+    apBssid: null,
+    rssi: null,
+    lastSeen: null,
+    online: false
+  };
+};
 
 const WeatherMonitor = () => {
   const [isPolling, setIsPolling] = useState(true);
@@ -90,8 +102,13 @@ const WeatherMonitor = () => {
   const [chartMetricView, setChartMetricView] = useState('all');
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   
-  // Multi-Node Weather Telemetry State: { [nodeId]: nodeTelemetry }
-  const [nodesMap, setNodesMap] = useState({ 1: createInitialNode(1), 2: createInitialNode(2) });
+  // Multi-Node Weather Telemetry State: { [nodeId]: nodeTelemetry } - Seeded with 4 primary deployment stations
+  const [nodesMap, setNodesMap] = useState({ 
+    1: createInitialNode(1), 
+    2: createInitialNode(2), 
+    3: createInitialNode(3), 
+    4: createInitialNode(4) 
+  });
   // Selected Station: '1', '2', '3', etc., or 'all' for multi-station mesh matrix
   const [selectedStation, setSelectedStation] = useState('1');
 
@@ -162,6 +179,25 @@ const WeatherMonitor = () => {
                 updated[numId] = createInitialNode(numId);
               }
             });
+
+            // Populate station names and locations from registered stations database
+            if (data.stations && Array.isArray(data.stations)) {
+              data.stations.forEach(s => {
+                const sId = Number(s.nodeId);
+                if (sId) {
+                  if (!updated[sId]) {
+                    updated[sId] = createInitialNode(sId, s);
+                  } else {
+                    updated[sId] = {
+                      ...updated[sId],
+                      displayName: s.name || updated[sId].displayName,
+                      location: s.location || updated[sId].location,
+                      deviceId: s.deviceId || updated[sId].deviceId
+                    };
+                  }
+                }
+              });
+            }
 
             // Populate the latest historical readings into nodes that haven't received live packets yet
             data.readings.forEach(r => {
@@ -438,6 +474,8 @@ const WeatherMonitor = () => {
             [originNode]: {
               ...existing,
               deviceId: deviceId || existing.deviceId,
+              displayName: reading.station_name || existing.displayName,
+              location: reading.station_location || existing.location,
               windSpeed: payload.wind_speed !== undefined ? Number(payload.wind_speed) : 0.0,
               windDirection: payload.wind_direction || 'None',
               temperature: payload.temperature !== undefined ? Number(payload.temperature) : existing.temperature,
@@ -662,9 +700,14 @@ const WeatherMonitor = () => {
                 <div style={{
                   width: 8, height: 8, borderRadius: '50%',
                   background: node.online ? '#10b981' : '#f43f5e',
-                  boxShadow: node.online ? '0 0 6px #10b981' : 'none'
+                  boxShadow: node.online ? '0 0 6px #10b981' : 'none',
+                  flexShrink: 0
                 }} />
-                <span>📡 Station Node #{node.nodeId}</span>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', textAlign: 'left', lineHeight: 1.2 }}>
+                  <span style={{ fontWeight: isSelected ? 700 : 600 }}>
+                    📡 Node #{node.nodeId}: {node.location || node.displayName || `Station ${node.nodeId}`}
+                  </span>
+                </div>
                 {node.temperature !== null && (
                   <span style={{ fontSize: '0.75rem', opacity: 0.8, marginLeft: 2, background: 'rgba(0,0,0,0.06)', padding: '1px 6px', borderRadius: 4 }}>
                     {node.temperature.toFixed(1)}°C

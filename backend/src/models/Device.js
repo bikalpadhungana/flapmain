@@ -45,6 +45,31 @@ const DeviceSchema = new mongoose.Schema(
       enum: ['pending', 'active', 'suspended'],
       default: 'pending',
     },
+    node_id: {
+      type: Number,
+      default: null,
+      index: true,
+    },
+    aliases: {
+      type: [String],
+      default: [],
+    },
+    category: {
+      type: String,
+      default: 'Physical',
+    },
+    ip_address: {
+      type: String,
+      default: '',
+    },
+    min_usage: {
+      type: String,
+      default: '',
+    },
+    gateway_id: {
+      type: String,
+      default: '',
+    },
   },
   {
     timestamps: true,
@@ -53,5 +78,7 @@ const DeviceSchema = new mongoose.Schema(
 
 // Indexes
 DeviceSchema.index({ org_id: 1 });
+DeviceSchema.index({ device_type: 1, node_id: 1 });
+DeviceSchema.index({ aliases: 1 });
 
 module.exports = mongoose.model('Device', DeviceSchema);

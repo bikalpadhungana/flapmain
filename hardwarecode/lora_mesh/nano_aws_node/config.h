@@ -9,19 +9,24 @@
 #define AWS_CONFIG_H
 
 // ---- Hardware Node Identifier ----
-// Set AWS_NODE_ID to:
-//   1 = Primary Station (Roof Deck)       -> Device ID: flap-flap-aws-001-7zhj
-//   2 = Secondary Station (Perimeter/Field) -> Device ID: flap-flap-aws-002-node
-//   3 = Station #3, etc.
+// Set AWS_NODE_ID for target deployment site:
+//   1 = Manung Dada                    -> Device ID: flap-flap-aws-001-7zhj
+//   2 = Damauli Bazar                  -> Device ID: flap-flap-aws-002-node
+//   3 = Kalupada Dada Kathmandu        -> Device ID: flap-flap-aws-003-node
+//   4 = Chandragiri Hill Kathmandu     -> Device ID: flap-flap-aws-004-node
 #ifndef AWS_NODE_ID
   #define AWS_NODE_ID        0x01                          // Unique Node ID on LoRa Mesh (1..255)
 #endif
 
 #ifndef FLAPMAIN_DEVICE_ID
   #if AWS_NODE_ID == 1
-    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"      // Registered in Main Local Server DB
+    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-001-7zhj"      // Manung Dada
   #elif AWS_NODE_ID == 2
-    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-002-node"      // Registered in Main Local Server DB
+    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-002-node"      // Damauli Bazar
+  #elif AWS_NODE_ID == 3
+    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-003-node"      // Kalupada Dada Kathmandu
+  #elif AWS_NODE_ID == 4
+    #define FLAPMAIN_DEVICE_ID "flap-flap-aws-004-node"      // Chandragiri Hill Kathmandu
   #else
     #define FLAPMAIN_DEVICE_ID "flap-flap-aws-custom"
   #endif

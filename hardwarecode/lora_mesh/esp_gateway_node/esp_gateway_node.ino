@@ -453,13 +453,16 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-Device-Id", nodeDeviceId);
   http.addHeader("X-Device-Key", FLAPMAIN_DEVICE_KEY);
-  http.setTimeout(1500);
+  http.addHeader("X-Gateway-Id", "esp_gateway_node_01");
+  http.addHeader("X-Origin-Node", String(pkt.originNode));
+  http.setTimeout(3500);
 
   String devType = (pkt.packetType == PKT_TYPE_TEXT || pkt.packetType == PKT_TYPE_SOS) ? "walkie_talkie_v1" : "weather_station_v1";
 
   float altitude = (pkt.pressure_pa > 0) ? (44330.0 * (1.0 - pow((float)pkt.pressure_pa / 101325.0, 0.1903))) : 0.0;
 
   String postData = "{";
+  postData += "\"gateway_id\":\"esp_gateway_node_01\",";
   postData += "\"device_id\":\"" + nodeDeviceId + "\",";
   postData += "\"device_type\":\"" + devType + "\",";
   postData += "\"wind_speed\":" + String(pkt.wind_speed_x10 / 10.0, 1) + ",";

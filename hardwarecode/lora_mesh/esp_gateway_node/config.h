@@ -9,8 +9,8 @@
 #define CONFIG_H
 
 // ---- Wi-Fi Station Credentials ----
-#define WIFI_SSID       "ALHN-334A"      // Replace with your local WiFi network name
-#define WIFI_PASSWORD   "vRY79KAwK9"  // Replace with your local WiFi password
+#define WIFI_SSID       "bikalpakolab"      // Replace with your local WiFi network name
+#define WIFI_PASSWORD   "V2xM9yL3K5pH8nG7"  // Replace with your local WiFi password
 
 // ---- Hotspot AP Fallback Credentials ----
 #define AP_SSID         "FlapMain-LoRaGateway-AP"

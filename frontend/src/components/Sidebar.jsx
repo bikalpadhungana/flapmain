@@ -15,6 +15,7 @@ const NAV_SECTIONS = [
       { name: 'Weather Station', path: '/weather-monitor', icon: CloudSun },
       { name: 'SOS & LoRa Mesh', path: '/sos-alert', icon: AlertTriangle },
       { name: 'Camera Section', path: '/cameras', icon: Camera },
+
     ],
   },
   {

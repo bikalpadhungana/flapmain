@@ -33,8 +33,32 @@ const processTelemetry = async (req, res) => {
   }
 
   try {
-    // 1. Fetch device registry or auto-provision if hardware auto-connects
+    // 1. Fetch device registry with multi-strategy resolution (device_id, aliases, LoRa mesh node_id)
     let device = await Device.findOne({ device_id });
+    if (!device) {
+      device = await Device.findOne({ aliases: device_id });
+    }
+
+    const originNode = (req.body.mesh_origin_node !== undefined) 
+      ? Number(req.body.mesh_origin_node) 
+      : (req.headers['x-origin-node'] ? Number(req.headers['x-origin-node']) : null);
+
+    if (!device && originNode) {
+      device = await Device.findOne({
+        $or: [
+          { node_id: originNode },
+          { device_id: `flap-flap-aws-${String(originNode).padStart(3, '0')}-node` },
+          { device_id: `flap-aws-${String(originNode).padStart(3, '0')}` },
+          { device_id: `flap-aws-${originNode}` },
+          { aliases: `node-${originNode}` },
+          { aliases: `flap-aws-${originNode}` }
+        ]
+      });
+      if (device) {
+        console.log(`[MESH TELEMETRY ROUTED]: LoRa origin node #${originNode} matched registered station '${device.name}' (${device.device_id}) at '${device.location}'`);
+      }
+    }
+
     if (!device) {
       const defaultOrg = (await Org.findOne({ slug: 'flap' })) || (await Org.findOne());
       if (defaultOrg) {
@@ -49,21 +73,53 @@ const processTelemetry = async (req, res) => {
             detectedType = 'weight_scale_v1';
           }
         }
+        
         let displayName = `Height & Weight Scale (${device_id})`;
-        if (detectedType === 'weather_station_v1') displayName = `FlapMain Weather Station Pro (${device_id})`;
-        if (detectedType === 'esp32_cam_v1') displayName = `ESP32-CAM Live Surveillance (${device_id})`;
+        let displayLocation = 'Main Station';
+        let assignedNodeId = originNode || null;
+        let aliasesList = [device_id];
+
+        if (detectedType === 'weather_station_v1') {
+          const knownStations = {
+            1: { name: 'Manung Dada Weather Station (Node #1)', location: 'Manung Dada' },
+            2: { name: 'Damauli Bazar Weather Station (Node #2)', location: 'Damauli Bazar' },
+            3: { name: 'Kalupada Dada Kathmandu Weather Station (Node #3)', location: 'Kalupada Dada Kathmandu' },
+            4: { name: 'Chandragiri Hill Kathmandu Weather Station (Node #4)', location: 'Chandragiri Hill Kathmandu' }
+          };
+
+          if (assignedNodeId && knownStations[assignedNodeId]) {
+            displayName = knownStations[assignedNodeId].name;
+            displayLocation = knownStations[assignedNodeId].location;
+          } else if (assignedNodeId) {
+            displayName = `Weather Station (Node #${assignedNodeId})`;
+            displayLocation = `Station Site #${assignedNodeId}`;
+          } else {
+            displayName = `FlapMain Weather Station Pro (${device_id})`;
+          }
+
+          if (assignedNodeId) {
+            aliasesList.push(`flap-aws-${String(assignedNodeId).padStart(3, '0')}`);
+            aliasesList.push(`flap-flap-aws-${String(assignedNodeId).padStart(3, '0')}-node`);
+            aliasesList.push(`node-${assignedNodeId}`);
+          }
+        } else if (detectedType === 'esp32_cam_v1') {
+          displayName = `ESP32-CAM Live Surveillance (${device_id})`;
+        }
 
         device = await Device.create({
           device_id,
           org_id: defaultOrg._id,
           device_type: detectedType,
           name: displayName,
-          location: 'Main Station',
+          location: displayLocation,
+          node_id: assignedNodeId,
+          aliases: aliasesList,
+          category: 'Physical',
           api_key_hash: hashKey(keyToHash),
           status: 'online',
           activation_status: 'active',
         });
-        console.log(`[AUTO-PROVISIONED ${detectedType.toUpperCase()} DEVICE]: ${device_id}`);
+        console.log(`[AUTO-PROVISIONED ${detectedType.toUpperCase()} DEVICE]: ${device_id} mapped to "${displayName}" at "${displayLocation}"`);
       } else {
         return res.status(404).json({ status: 'error', message: 'Device not registered' });
       }
@@ -298,29 +354,34 @@ const processTelemetry = async (req, res) => {
     // 5. Write to time-series DB
     const reading = await Reading.create({
       timestamp: new Date(),
-      device_id,
+      device_id: device.device_id,
       org_id: device.org_id,
       device_type: device.device_type,
       payload: validatedPayload,
     });
 
-    // 6. Update device connection stats
+    // 6. Update device connection stats for the matched device
     await Device.updateOne(
-      { device_id },
+      { _id: device._id },
       { $set: { status: 'online', last_seen: new Date() } }
     );
 
     // Emit Socket.io event for real-time dashboards
     try {
       const io = require('../socket').getIO();
+      const enrichedReading = reading.toObject ? reading.toObject() : { ...reading };
+      enrichedReading.station_name = device.name;
+      enrichedReading.station_location = device.location;
+      enrichedReading.node_id = device.node_id || validatedPayload.mesh_origin_node || 1;
+
       if (validatedPayload.wind_speed !== undefined || validatedPayload.wind_direction !== undefined || device.device_type === 'weather_station_v1') {
-        io.emit('new_weather_reading', reading);
+        io.emit('new_weather_reading', enrichedReading);
       } else if (validatedPayload.stream_url !== undefined || device.device_type === 'esp32_cam_v1') {
-        io.emit('new_camera_reading', reading);
+        io.emit('new_camera_reading', enrichedReading);
       } else {
-        io.emit('new_scale_reading', reading);
+        io.emit('new_scale_reading', enrichedReading);
       }
-      io.emit('new_telemetry', reading);
+      io.emit('new_telemetry', enrichedReading);
 
       // Emit dedicated new_sos_alert if telemetry contains active emergency alert level
       if (validatedPayload.alert_level > 0 || (validatedPayload.text_msg && /sos|emergency/i.test(validatedPayload.text_msg))) {
@@ -538,7 +599,7 @@ router.post('/:device_id/readings', processTelemetry);
 // @desc    Register a new device & generate its API key
 // @access  Private (Dashboard user)
 router.post('/', authenticateUser, async (req, res) => {
-  const { device_id, device_type, name, location } = req.body;
+  const { device_id, device_type, name, location, category, status, ip_address, min_usage, node_id, gateway_id, aliases } = req.body;
 
   if (!device_id || !device_type || !name) {
     return res.status(400).json({ message: 'Please provide device_id, device_type, and name' });
@@ -555,7 +616,34 @@ router.post('/', authenticateUser, async (req, res) => {
       return res.status(400).json({ message: `Device with ID '${device_id}' already registered` });
     }
 
-    const rawApiKey = 'flap_dev_' + crypto.randomBytes(24).toString('hex');
+    // Auto-calculate node_id for weather stations if not specified
+    let parsedNodeId = (node_id !== undefined && node_id !== null && node_id !== '') ? Number(node_id) : null;
+    if (!parsedNodeId && device_type.toLowerCase() === 'weather_station_v1') {
+      const match = device_id.match(/(\d+)/);
+      if (match) parsedNodeId = parseInt(match[1], 10);
+    }
+
+    // Build standard aliases so incoming LoRa gateway packets will match
+    const aliasList = Array.isArray(aliases) ? [...aliases] : [];
+    if (!aliasList.includes(device_id)) aliasList.push(device_id);
+    if (parsedNodeId) {
+      // For 4-digit production node IDs (1001+) skip legacy 3-digit padded aliases
+      const standardAliases = [
+        `flap-aws-${parsedNodeId}`,
+        `node-${parsedNodeId}`
+      ];
+      // Only add legacy format for old-style small node IDs (< 1000)
+      if (parsedNodeId < 1000) {
+        const padded = String(parsedNodeId).padStart(3, '0');
+        standardAliases.push(`flap-flap-aws-${padded}-node`, `flap-aws-${padded}`);
+      }
+      standardAliases.forEach(a => {
+        if (!aliasList.includes(a)) aliasList.push(a);
+      });
+    }
+
+    const keyPrefix = (device_type && device_type.toLowerCase() === 'weather_station_v1') ? 'flap_prod_' : 'flap_dev_';
+    const rawApiKey = keyPrefix + crypto.randomBytes(24).toString('hex');
     const api_key_hash = hashKey(rawApiKey);
 
     const device = await Device.create({
@@ -564,9 +652,15 @@ router.post('/', authenticateUser, async (req, res) => {
       device_type: device_type.toLowerCase(),
       name,
       location: location || '',
-      api_key_hash,
-      status: 'offline',
+      node_id: parsedNodeId,
+      aliases: aliasList,
+      category: category || 'Physical',
+      status: status === 'Active' ? 'online' : (status ? status.toLowerCase() : 'offline'),
       activation_status: 'active',
+      ip_address: ip_address || '',
+      min_usage: min_usage || '',
+      gateway_id: gateway_id || '',
+      api_key_hash,
     });
 
     res.status(201).json({
@@ -577,6 +671,9 @@ router.post('/', authenticateUser, async (req, res) => {
         device_type: device.device_type,
         name: device.name,
         location: device.location,
+        node_id: device.node_id,
+        aliases: device.aliases,
+        category: device.category,
         status: device.status,
       },
       apiKey: rawApiKey,
@@ -675,6 +772,106 @@ router.get('/:device_id', authenticateUser, async (req, res) => {
   } catch (error) {
     console.error('Get device error:', error);
     res.status(500).json({ message: 'Server error fetching device details' });
+  }
+});
+
+// @route   PUT /v1/devices/:device_id
+// @desc    Update device settings from dashboard
+// @access  Private (Dashboard user)
+router.put('/:device_id', authenticateUser, async (req, res) => {
+  try {
+    const { name, location, category, status, ip_address, min_usage, node_id, aliases } = req.body;
+    const device = await Device.findOne({ device_id: req.params.device_id, org_id: req.org_id });
+
+    if (!device) {
+      return res.status(404).json({ message: 'Device not found' });
+    }
+
+    if (name !== undefined) device.name = name;
+    if (location !== undefined) device.location = location;
+    if (category !== undefined) device.category = category;
+    if (status !== undefined) device.status = status.toLowerCase() === 'active' ? 'online' : status.toLowerCase();
+    if (ip_address !== undefined) device.ip_address = ip_address;
+    if (min_usage !== undefined) device.min_usage = min_usage;
+    if (node_id !== undefined && node_id !== null && node_id !== '') {
+      device.node_id = Number(node_id);
+      const nid = device.node_id;
+      const standardAliases = [`flap-aws-${nid}`, `node-${nid}`];
+      // Keep legacy 3-digit padded format only for small (pre-production) node IDs
+      if (nid < 1000) {
+        const padded = String(nid).padStart(3, '0');
+        standardAliases.push(`flap-flap-aws-${padded}-node`, `flap-aws-${padded}`);
+      }
+      if (!Array.isArray(device.aliases)) device.aliases = [];
+      standardAliases.forEach(a => {
+        if (!device.aliases.includes(a)) device.aliases.push(a);
+      });
+    }
+    if (Array.isArray(aliases)) device.aliases = aliases;
+
+    await device.save();
+    res.json({ message: 'Device updated successfully', device });
+  } catch (error) {
+    console.error('Update device error:', error);
+    res.status(500).json({ message: 'Server error updating device' });
+  }
+});
+
+// @route   DELETE /v1/devices/:device_id
+// @desc    Delete a device
+// @access  Private (Dashboard user)
+router.delete('/:device_id', authenticateUser, async (req, res) => {
+  try {
+    const device = await Device.findOneAndDelete({ device_id: req.params.device_id, org_id: req.org_id });
+    if (!device) {
+      return res.status(404).json({ message: 'Device not found' });
+    }
+    res.json({ message: 'Device deleted successfully', device_id: req.params.device_id });
+  } catch (error) {
+    console.error('Delete device error:', error);
+    res.status(500).json({ message: 'Server error deleting device' });
+  }
+});
+
+// @route   PATCH /v1/devices/:device_id/activate
+// @desc    Activate or suspend device
+// @access  Private (Dashboard user)
+router.patch('/:device_id/activate', authenticateUser, async (req, res) => {
+  try {
+    const device = await Device.findOne({ device_id: req.params.device_id, org_id: req.org_id });
+    if (!device) {
+      return res.status(404).json({ message: 'Device not found' });
+    }
+
+    device.activation_status = (device.activation_status === 'active') ? 'suspended' : 'active';
+    await device.save();
+
+    res.json({ 
+      message: `Device status changed to ${device.activation_status}`, 
+      activation_status: device.activation_status 
+    });
+  } catch (error) {
+    console.error('Toggle activation error:', error);
+    res.status(500).json({ message: 'Server error changing device activation status' });
+  }
+});
+
+// @route   GET /v1/devices/stations/all
+// @desc    Get all registered weather stations with their node IDs and locations
+// @access  Public / Authenticated
+router.get('/stations/all', async (req, res) => {
+  try {
+    const stations = await Device.find({ 
+      $or: [
+        { device_type: 'weather_station_v1' },
+        { node_id: { $ne: null } }
+      ]
+    }).select('device_id name location node_id status last_seen aliases');
+
+    res.json(stations);
+  } catch (error) {
+    console.error('Get stations error:', error);
+    res.status(500).json({ message: 'Failed to fetch weather stations' });
   }
 });
 
@@ -1704,15 +1901,38 @@ router.get('/telemetry/history', async (req, res) => {
 
     // Query all distinct active nodes present across the entire time window
     const distinctRaw = await Reading.distinct('payload.mesh_origin_node', filter);
-    const activeNodes = Array.from(new Set(
+    const readingActiveNodes = Array.from(new Set(
       distinctRaw.filter(n => n !== undefined && n !== null).map(Number)
     )).sort((a, b) => a - b);
+
+    // Query registered weather stations to include station metadata (names & locations)
+    const registeredStations = await Device.find({
+      $or: [
+        { device_type: 'weather_station_v1' },
+        { node_id: { $ne: null } }
+      ]
+    }).select('device_id name location node_id status last_seen aliases');
+
+    const stationsMeta = registeredStations.map(s => ({
+      nodeId: s.node_id || 1,
+      deviceId: s.device_id,
+      name: s.name,
+      location: s.location,
+      status: s.status,
+      lastSeen: s.last_seen
+    }));
+
+    const allNodeIds = Array.from(new Set([
+      ...readingActiveNodes,
+      ...registeredStations.filter(s => s.node_id).map(s => s.node_id)
+    ])).sort((a, b) => a - b);
 
     res.json({
       status: 'success',
       range: start_date ? 'custom' : range,
       count: formatted.length,
-      activeNodes: activeNodes.length > 0 ? activeNodes : [1],
+      activeNodes: allNodeIds.length > 0 ? allNodeIds : [1, 2, 3, 4],
+      stations: stationsMeta,
       stats,
       readings: formatted
     });
