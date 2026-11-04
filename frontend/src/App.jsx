@@ -14,6 +14,7 @@ import SensorFusion from './pages/SensorFusion';
 import WeatherMonitor from './pages/WeatherMonitor';
 import SosAlert from './pages/SosAlert';
 import CameraMonitor from './pages/CameraMonitor';
+import CardReader from './pages/CardReader';
 import './App.css';
 
 // Guard wrapper
@@ -151,6 +152,16 @@ function App() {
             <ProtectedRoute>
               <DashboardLayout>
                 <CameraMonitor />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/card-readers"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <CardReader />
               </DashboardLayout>
             </ProtectedRoute>
           }
