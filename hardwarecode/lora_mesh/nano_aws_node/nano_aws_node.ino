@@ -31,6 +31,11 @@
   1 // 1 = Primary Station, 2 = Station #2, 3 = Station #3, etc.
 #endif
 
+// originNode is a single byte in the LoRa packet; larger IDs wrap (1003 -> 235).
+#if AWS_NODE_ID < 1 || AWS_NODE_ID > 255
+#error "AWS_NODE_ID must be 1..255 (it is sent as one byte in the LoRa packet)"
+#endif
+
 #if __has_include("config.h")
 #include "config.h"
 #endif

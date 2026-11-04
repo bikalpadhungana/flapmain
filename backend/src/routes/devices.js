@@ -20,6 +20,9 @@ const { deviceAuthMode } = require('../config/security');
 const { evaluateAlertRules } = require('../services/alertEngine');
 const { checkOutboundUrl, postJson } = require('../services/outboundUrl');
 const { lookupCardHolder } = require('../services/flapCardLookup');
+const { readingTimeFrom, isDuplicatePacket, mergeHeardBy, heardByStale, recordDiscovery } = require('../services/meshIngest');
+const DiscoveredNode = require('../models/DiscoveredNode');
+const PendingReading = require('../models/PendingReading');
 
 const router = express.Router();
 
@@ -71,6 +74,40 @@ const csvCell = (v) => {
 };
 
 
+// GPS from a request body. Returns { ok, latitude, longitude, error }; empty = null.
+const parseGps = (body) => {
+  const out = { ok: true };
+  for (const [key, max] of [['latitude', 90], ['longitude', 180]]) {
+    if (!(key in body)) continue;
+    const v = body[key];
+    if (v === null || v === '') { out[key] = null; continue; }
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < -max || n > max) return { ok: false, error: `${key} must be a number between -${max} and ${max}` };
+    out[key] = n;
+  }
+  return out;
+};
+
+// LoRa node numbers travel as one byte in the radio packet (1..255).
+const LORA_NODE_TYPES = new Set(['weather_station_v1', 'walkie_talkie_v1', 'lora_repeater_v1']);
+const invalidLoraNodeId = (deviceType, nodeId) =>
+  nodeId !== null && nodeId !== undefined && LORA_NODE_TYPES.has(String(deviceType || '').toLowerCase()) &&
+  (!Number.isInteger(nodeId) || nodeId < 1 || nodeId > 255);
+
+// Best guess of a device type from an unregistered device's first packet.
+const guessDeviceType = (body, deviceId) => {
+  const declared = String((body && body.device_type) || '').toLowerCase();
+  if (declared) return declared;
+  const id = String(deviceId || '');
+  if (body.wind_speed !== undefined || body.wind_direction !== undefined || /aws|weather/i.test(id)) return 'weather_station_v1';
+  if (body.stream_url !== undefined || /cam/i.test(id)) return 'esp32_cam_v1';
+  return 'weight_scale_v1';
+};
+
+// Unknown devices are listed under "Discovered devices" until an admin adds them.
+// AUTO_PROVISION_DEVICES=true restores the old behaviour (create them automatically).
+const autoProvisionEnabled = () => String(process.env.AUTO_PROVISION_DEVICES || '').toLowerCase() === 'true';
+
 // Telemetry Ingestion Handler (for ESP8266 Height+Weight Hardware and REST Clients)
 const processTelemetry = async (req, res) => {
   const device_id = req.params.device_id || req.headers['x-device-id'] || req.headers['device_id'] || req.body.device_id;
@@ -113,7 +150,17 @@ const processTelemetry = async (req, res) => {
     const keyCheck = await checkDeviceKey(device, deviceKey);
     if (device && !enforceDeviceAuth(req, res, keyCheck, `telemetry for ${device_id}`)) return;
 
-    if (!device) {
+    let discoveryOrg = null;
+    if (!device && !autoProvisionEnabled()) {
+      // Same trust rule as auto-provisioning: in enforce mode only a known relay key.
+      if (!keyCheck.ok && !enforceDeviceAuth(req, res, keyCheck, `discovery of ${device_id}`)) return;
+      discoveryOrg = keyCheck.relay
+        ? await Org.findById(keyCheck.relay.org_id)
+        : ((await Org.findOne({ slug: 'flap' })) || (await Org.findOne()));
+      if (!discoveryOrg) return res.status(404).json({ status: 'error', message: 'Device not registered' });
+    }
+
+    if (!device && !discoveryOrg) {
       // Auto-provisioning from an unauthenticated public endpoint lets anyone
       // create devices. In enforce mode only a known relay (gateway) may do it.
       if (!keyCheck.ok && !enforceDeviceAuth(req, res, keyCheck, `auto-provision of ${device_id}`)) return;
@@ -185,12 +232,12 @@ const processTelemetry = async (req, res) => {
       }
     }
 
-    if (device.activation_status !== 'active') {
+    if (device && device.activation_status !== 'active') {
       return res.status(403).json({ status: 'error', message: 'Device pending activation' });
     }
 
     // 2. Fetch device schema
-    const schemaDoc = await getDeviceTypeSchema(device.device_type);
+    const schemaDoc = await getDeviceTypeSchema(device ? device.device_type : guessDeviceType(req.body, device_id));
 
     // 3. Validate payload fields — unpack both top-level and nested data/payload wrappers
     const rawData = (typeof req.body.data === 'object' && req.body.data !== null) ? req.body.data : {};
@@ -329,6 +376,43 @@ const processTelemetry = async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Payload contains no valid schema fields' });
     }
 
+    // Mesh metadata: which gateway received it, when, and the packet's message ID.
+    const readingTime = readingTimeFrom(req.body);
+    const gatewayId = String(req.body.gateway_id || req.headers['x-gateway-id'] || '').slice(0, 64);
+    const msgId = req.body.msg_id ?? req.body.mesh_msg_id;
+    const isMeshPacket = !!gatewayId || (originNode !== null && Number.isFinite(originNode));
+    if (gatewayId) validatedPayload.gateway_id = gatewayId;
+    if (msgId !== undefined && msgId !== null && Number.isFinite(Number(msgId))) validatedPayload.msg_id = Number(msgId);
+
+    if (!device) {
+      await recordDiscovery({
+        orgId: discoveryOrg._id,
+        reportedDeviceId: device_id,
+        originNode: Number.isFinite(originNode) ? originNode : null,
+        typeGuess: guessDeviceType(req.body, device_id),
+        payload: validatedPayload,
+        gatewayId,
+        rssi: validatedPayload.rssi,
+        snr: validatedPayload.snr,
+        when: readingTime,
+      });
+      return res.status(202).json({
+        status: 'pending',
+        message: 'Device not registered yet; it is listed under Discovered devices in the dashboard',
+      });
+    }
+
+    // The same radio packet may arrive through several gateways: keep it once.
+    if (isMeshPacket) {
+      const nodeKey = `${device._id}:${Number.isFinite(originNode) ? originNode : ''}`;
+      if (isDuplicatePacket(nodeKey, validatedPayload.msg_id, validatedPayload)) {
+        if (heardByStale(device.heard_by, gatewayId)) {
+          await Device.updateOne({ _id: device._id }, { $set: { heard_by: mergeHeardBy(device.heard_by, gatewayId, validatedPayload.rssi, validatedPayload.snr) } });
+        }
+        return res.status(200).json({ status: 'duplicate', message: 'Packet already received via another gateway' });
+      }
+    }
+
     // 4. Link with active card tap session & Fusion Group
     // Skip the FusionGroup query entirely when no tap session is live (the common
     // case for weather stations) — it previously ran on every telemetry packet.
@@ -410,7 +494,7 @@ const processTelemetry = async (req, res) => {
 
     // 5. Write to time-series DB
     const reading = await Reading.create({
-      timestamp: new Date(),
+      timestamp: readingTime,
       device_id: device.device_id,
       org_id: device.org_id,
       device_type: device.device_type,
@@ -418,11 +502,11 @@ const processTelemetry = async (req, res) => {
     });
 
     // 6. Update device connection stats (throttled)
-    if (device.status !== 'online' || !device.last_seen || Date.now() - new Date(device.last_seen).getTime() > LAST_SEEN_WRITE_INTERVAL_MS) {
-      await Device.updateOne(
-        { _id: device._id },
-        { $set: { status: 'online', last_seen: new Date() } }
-      );
+    const heardStale = heardByStale(device.heard_by, gatewayId);
+    if (heardStale || device.status !== 'online' || !device.last_seen || Date.now() - new Date(device.last_seen).getTime() > LAST_SEEN_WRITE_INTERVAL_MS) {
+      const set = { status: 'online', last_seen: new Date() };
+      if (gatewayId) set.heard_by = mergeHeardBy(device.heard_by, gatewayId, validatedPayload.rssi, validatedPayload.snr);
+      await Device.updateOne({ _id: device._id }, { $set: set });
     }
 
     // Emit Socket.io event for real-time dashboards
@@ -684,6 +768,9 @@ router.post('/', authenticateUser, async (req, res) => {
       return res.status(400).json({ message: `Device type '${device_type}' not registered in Schema Registry` });
     }
 
+    const gps = parseGps(req.body);
+    if (!gps.ok) return res.status(400).json({ message: gps.error });
+
     const existingDevice = await Device.findOne({ device_id });
     if (existingDevice) {
       return res.status(400).json({ message: `Device with ID '${device_id}' already registered` });
@@ -693,7 +780,10 @@ router.post('/', authenticateUser, async (req, res) => {
     let parsedNodeId = (node_id !== undefined && node_id !== null && node_id !== '') ? Number(node_id) : null;
     if (!parsedNodeId && device_type.toLowerCase() === 'weather_station_v1') {
       const match = device_id.match(/(\d+)/);
-      if (match) parsedNodeId = parseInt(match[1], 10);
+      if (match && Number(match[1]) >= 1 && Number(match[1]) <= 255) parsedNodeId = parseInt(match[1], 10);
+    }
+    if (invalidLoraNodeId(device_type, parsedNodeId)) {
+      return res.status(400).json({ message: 'node_id must be 1-255: LoRa sends the node number as one byte (e.g. 1003 arrives as 235)' });
     }
 
     // Build standard aliases so incoming LoRa gateway packets will match
@@ -733,6 +823,8 @@ router.post('/', authenticateUser, async (req, res) => {
       ip_address: ip_address || '',
       min_usage: min_usage || '',
       gateway_id: gateway_id || '',
+      latitude: gps.latitude ?? null,
+      longitude: gps.longitude ?? null,
       api_key_hash,
     });
 
@@ -748,12 +840,140 @@ router.post('/', authenticateUser, async (req, res) => {
         aliases: device.aliases,
         category: device.category,
         status: device.status,
+        latitude: device.latitude,
+        longitude: device.longitude,
       },
       apiKey: rawApiKey,
     });
   } catch (error) {
     console.error('Device registration error:', error);
     res.status(500).json({ message: 'Server error registering device' });
+  }
+});
+
+// ─── Discovered devices ──────────────────────────────────────────────────────
+// Devices that sent data but are not registered. An admin adds (claims) them,
+// either as a new device or by attaching them to an existing one.
+
+// @route   GET /v1/devices/discovered        (?status=ignored|all)
+router.get('/discovered', authenticateUser, async (req, res) => {
+  try {
+    const filter = { org_id: req.org_id };
+    if (req.query.status !== 'all') filter.status = req.query.status === 'ignored' ? 'ignored' : 'new';
+    const nodes = await DiscoveredNode.find(filter).sort({ last_seen: -1 }).limit(200).lean();
+    res.json(nodes);
+  } catch (error) {
+    console.error('List discovered devices error:', error);
+    res.status(500).json({ message: 'Server error fetching discovered devices' });
+  }
+});
+
+// @route   POST /v1/devices/discovered/:id/claim
+// @body    { mode: 'new', device_id, device_type, name, location, latitude, longitude }
+//       or { mode: 'attach', target_device_id, latitude?, longitude? }
+router.post('/discovered/:id/claim', authenticateUser, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: 'Discovered device not found' });
+    const node = await DiscoveredNode.findOne({ _id: req.params.id, org_id: req.org_id });
+    if (!node) return res.status(404).json({ message: 'Discovered device not found' });
+
+    const gps = parseGps(req.body);
+    if (!gps.ok) return res.status(400).json({ message: gps.error });
+
+    // Identifiers the gateway will keep sending for this node.
+    const newAliases = [node.reported_device_id];
+    if (node.origin_node) newAliases.push(`node-${node.origin_node}`);
+
+    let device;
+    let rawApiKey = null;
+    const attach = req.body.mode === 'attach';
+    if (attach) {
+      device = await Device.findOne({ device_id: req.body.target_device_id, org_id: req.org_id });
+      if (!device) return res.status(404).json({ message: 'Target device not found' });
+      device.aliases = [...new Set([...(device.aliases || []), ...newAliases])];
+      if ('latitude' in gps) device.latitude = gps.latitude;
+      if ('longitude' in gps) device.longitude = gps.longitude;
+      await device.save();
+    } else {
+      const deviceType = String(req.body.device_type || node.device_type_guess || '').toLowerCase();
+      const deviceId = String(req.body.device_id || node.reported_device_id).trim();
+      const name = String(req.body.name || '').trim();
+      if (!deviceType || !name) return res.status(400).json({ message: 'Please provide a name and device type' });
+      if (!(await DeviceType.findOne({ device_type: deviceType }))) {
+        return res.status(400).json({ message: `Device type '${deviceType}' not registered in Schema Registry` });
+      }
+      if (await Device.findOne({ device_id: deviceId })) {
+        return res.status(400).json({ message: `Device with ID '${deviceId}' already registered; attach to it instead` });
+      }
+      rawApiKey = 'flap_dev_' + crypto.randomBytes(24).toString('hex');
+      device = await Device.create({
+        device_id: deviceId,
+        org_id: req.org_id,
+        device_type: deviceType,
+        name,
+        location: req.body.location || '',
+        node_id: node.origin_node || null,
+        aliases: [...new Set([deviceId, ...newAliases])],
+        category: 'Physical',
+        status: 'online',
+        last_seen: node.last_seen,
+        activation_status: 'active',
+        latitude: gps.latitude ?? null,
+        longitude: gps.longitude ?? null,
+        heard_by: node.heard_by || [],
+        api_key_hash: hashKey(rawApiKey),
+      });
+    }
+
+    // Move the readings received while the device was unregistered.
+    const pending = await PendingReading.find({ discovered_id: node._id }).sort({ timestamp: 1 }).lean();
+    if (pending.length) {
+      await Reading.insertMany(pending.map((p) => ({
+        timestamp: p.timestamp,
+        device_id: device.device_id,
+        org_id: device.org_id,
+        device_type: device.device_type,
+        payload: p.payload,
+      })));
+    }
+    await PendingReading.deleteMany({ discovered_id: node._id });
+    await DiscoveredNode.deleteOne({ _id: node._id });
+
+    console.log(`[DISCOVERED DEVICE CLAIMED]: ${node.reported_device_id} -> ${device.device_id} (${attach ? 'attached' : 'new'}, ${pending.length} readings moved)`);
+    const out = device.toObject();
+    delete out.api_key_hash;
+    res.status(201).json({ message: 'Device added', device: out, moved_readings: pending.length, ...(rawApiKey ? { apiKey: rawApiKey } : {}) });
+  } catch (error) {
+    console.error('Claim discovered device error:', error);
+    res.status(500).json({ message: 'Server error adding discovered device' });
+  }
+});
+
+// @route   PATCH /v1/devices/discovered/:id   { status: 'ignored' | 'new' }
+router.patch('/discovered/:id', authenticateUser, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: 'Discovered device not found' });
+    const status = req.body.status === 'new' ? 'new' : 'ignored';
+    const node = await DiscoveredNode.findOneAndUpdate({ _id: req.params.id, org_id: req.org_id }, { $set: { status } }, { new: true });
+    if (!node) return res.status(404).json({ message: 'Discovered device not found' });
+    res.json(node);
+  } catch (error) {
+    console.error('Update discovered device error:', error);
+    res.status(500).json({ message: 'Server error updating discovered device' });
+  }
+});
+
+// @route   DELETE /v1/devices/discovered/:id
+router.delete('/discovered/:id', authenticateUser, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: 'Discovered device not found' });
+    const node = await DiscoveredNode.findOneAndDelete({ _id: req.params.id, org_id: req.org_id });
+    if (!node) return res.status(404).json({ message: 'Discovered device not found' });
+    await PendingReading.deleteMany({ discovered_id: node._id });
+    res.json({ message: 'Discovered device removed' });
+  } catch (error) {
+    console.error('Delete discovered device error:', error);
+    res.status(500).json({ message: 'Server error removing discovered device' });
   }
 });
 
@@ -860,6 +1080,16 @@ router.put('/:device_id', authenticateUser, async (req, res) => {
       return res.status(404).json({ message: 'Device not found' });
     }
 
+    const gps = parseGps(req.body);
+    if (!gps.ok) return res.status(400).json({ message: gps.error });
+    if ('latitude' in gps) device.latitude = gps.latitude;
+    if ('longitude' in gps) device.longitude = gps.longitude;
+
+    if (node_id !== undefined && node_id !== null && node_id !== '' && Number(node_id) !== device.node_id &&
+        invalidLoraNodeId(device.device_type, Number(node_id))) {
+      return res.status(400).json({ message: 'node_id must be 1-255: LoRa sends the node number as one byte (e.g. 1003 arrives as 235)' });
+    }
+
     if (name !== undefined) device.name = name;
     if (location !== undefined) device.location = location;
     if (category !== undefined) device.category = category;
@@ -940,7 +1170,7 @@ router.get('/stations/all', authenticateUser, async (req, res) => {
         { device_type: 'weather_station_v1' },
         { node_id: { $ne: null } }
       ]
-    }).select('device_id name location node_id status last_seen aliases');
+    }).select('device_id name location node_id status last_seen aliases latitude longitude heard_by');
 
     res.json(stations);
   } catch (error) {
@@ -2092,7 +2322,7 @@ router.get('/telemetry/history', authenticateUser, async (req, res) => {
         { device_type: 'weather_station_v1' },
         { node_id: { $ne: null } }
       ]
-    }).select('device_id name location node_id status last_seen aliases');
+    }).select('device_id name location node_id status last_seen aliases latitude longitude heard_by');
 
     const stationsMeta = registeredStations.map(s => ({
       nodeId: s.node_id || 1,

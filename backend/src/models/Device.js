@@ -70,6 +70,32 @@ const DeviceSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    // GPS position entered when the device is added (fixed stations, gateways)
+    latitude: {
+      type: Number,
+      default: null,
+      min: -90,
+      max: 90,
+    },
+    longitude: {
+      type: Number,
+      default: null,
+      min: -180,
+      max: 180,
+    },
+    // LoRa gateways that recently received this node (most recent first, max 5)
+    heard_by: {
+      type: [
+        {
+          _id: false,
+          gateway_id: String,
+          rssi: Number,
+          snr: Number,
+          last_seen: Date,
+        },
+      ],
+      default: [],
+    },
   },
   {
     timestamps: true,

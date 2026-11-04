@@ -8,6 +8,7 @@ import {
 import { API_BASE_URL } from '../config';
 import Modal from '../components/Modal';
 import ConfirmModal from '../components/ConfirmModal';
+import DiscoveredDevices from '../components/DiscoveredDevices';
 
 // ─── Theme definitions ────────────────────────────────────────────────────────
 const HARDWARE_THEMES = [
@@ -344,7 +345,7 @@ function Devices() {
   const [devices, setDevices] = useState([]);
   const [isDeviceModalOpen, setIsDeviceModalOpen] = useState(false);
   const [editingDevice, setEditingDevice] = useState(null);
-  const [newDevice, setNewDevice] = useState({ device_id: '', name: '', device_type: '', location: '', category: 'Physical', status: 'Active', ip_address: '', min_usage: '', node_id: '' });
+  const [newDevice, setNewDevice] = useState({ device_id: '', name: '', device_type: '', location: '', category: 'Physical', status: 'Active', ip_address: '', min_usage: '', node_id: '', latitude: '', longitude: '' });
   const [deviceError, setDeviceError] = useState('');
   const [createdConfig, setCreatedConfig] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -404,10 +405,17 @@ function Devices() {
     pending: devices.filter(d => d.activation_status === 'pending').length,
   }), [devices]);
 
+  // Lowest LoRa node number (1..255) not used by another device.
+  const nextFreeNodeId = () => {
+    const used = new Set(devices.map(d => Number(d.node_id)).filter(Boolean));
+    for (let i = 1; i <= 255; i++) if (!used.has(i)) return i;
+    return '';
+  };
+
   // ── Auto generate device ID ────────────────────────────────────────────────
   const autoGenerateId = (type) => {
     if (type === 'weather_station_v1') {
-      const nextId = devices.filter(d => d.device_type === 'weather_station_v1').length + 1;
+      const nextId = nextFreeNodeId() || 1;
       return `flap-flap-aws-${String(nextId).padStart(3, '0')}-node`;
     }
     const prefix = type ? type.split('_')[0] : 'dev';
@@ -419,7 +427,7 @@ function Devices() {
   const handleDeviceTypeChange = (type) => {
     if (!editingDevice) {
       const isWeather = type === 'weather_station_v1';
-      const nextNodeId = isWeather ? devices.filter(d => d.device_type === 'weather_station_v1').length + 1 : '';
+      const nextNodeId = isWeather ? nextFreeNodeId() : '';
       setNewDevice(prev => ({ ...prev, device_type: type, device_id: autoGenerateId(type), node_id: nextNodeId }));
     }
   };
@@ -440,13 +448,15 @@ function Devices() {
         ip_address: deviceToEdit.ip_address || '',
         min_usage: deviceToEdit.min_usage || '',
         node_id: deviceToEdit.node_id != null ? String(deviceToEdit.node_id) : '',
+        latitude: deviceToEdit.latitude != null ? String(deviceToEdit.latitude) : '',
+        longitude: deviceToEdit.longitude != null ? String(deviceToEdit.longitude) : '',
       });
     } else {
       setEditingDevice(null);
       // Pre-select the device type matching the current tab's theme
       const themeType = currentTheme?.deviceTypes[0] || schemas[0]?.device_type || '';
       const isWeather = themeType === 'weather_station_v1';
-      const nextNodeId = isWeather ? devices.filter(d => d.device_type === 'weather_station_v1').length + 1 : '';
+      const nextNodeId = isWeather ? nextFreeNodeId() : '';
       setNewDevice({
         device_id: autoGenerateId(themeType || 'dev'),
         name: '',
@@ -457,6 +467,8 @@ function Devices() {
         ip_address: '',
         min_usage: '',
         node_id: nextNodeId,
+        latitude: '',
+        longitude: '',
       });
     }
     setIsDeviceModalOpen(true);
@@ -472,7 +484,7 @@ function Devices() {
         : `${API_BASE_URL}/v1/devices`;
       const method = editingDevice ? 'PUT' : 'POST';
       const payload = editingDevice
-        ? { name: newDevice.name, location: newDevice.location, category: newDevice.category, status: newDevice.status, ip_address: newDevice.ip_address, min_usage: newDevice.min_usage, node_id: newDevice.node_id ? Number(newDevice.node_id) : undefined }
+        ? { name: newDevice.name, location: newDevice.location, category: newDevice.category, status: newDevice.status, ip_address: newDevice.ip_address, min_usage: newDevice.min_usage, node_id: newDevice.node_id ? Number(newDevice.node_id) : undefined, latitude: newDevice.latitude, longitude: newDevice.longitude }
         : { ...newDevice, node_id: newDevice.node_id ? Number(newDevice.node_id) : undefined };
 
       const response = await fetch(url, {
@@ -486,7 +498,7 @@ function Devices() {
       if (!editingDevice) {
         let configHeader = '';
         if (newDevice.device_type === 'weather_station_v1') {
-          configHeader = `/*\n * FlapMain Arduino Nano AWS LoRa Station Configuration (config.h)\n * Deploy this file to: hardwarecode/lora_mesh/nano_aws_node/config.h\n */\n#ifndef AWS_CONFIG_H\n#define AWS_CONFIG_H\n\n#define AWS_NODE_ID        0x0${newDevice.node_id || 1}      // Unique LoRa Mesh Origin Node (1..255)\n#define FLAPMAIN_DEVICE_ID "${newDevice.device_id}"\n#define FLAPMAIN_DEVICE_KEY "${data.apiKey}"\n#define TELEMETRY_INTERVAL 5000\n#define LORA_FREQ_CONFIG   433E6\n\n#endif // AWS_CONFIG_H\n`;
+          configHeader = `/*\n * FlapMain Arduino Nano AWS LoRa Station Configuration (config.h)\n * Deploy this file to: hardwarecode/lora_mesh/nano_aws_node/config.h\n */\n#ifndef AWS_CONFIG_H\n#define AWS_CONFIG_H\n\n#define AWS_NODE_ID        ${Number(newDevice.node_id) || 1}      // Unique LoRa Mesh Origin Node (1..255)\n#define FLAPMAIN_DEVICE_ID "${newDevice.device_id}"\n#define FLAPMAIN_DEVICE_KEY "${data.apiKey}"\n#define TELEMETRY_INTERVAL 5000\n#define LORA_FREQ_CONFIG   433E6\n\n#endif // AWS_CONFIG_H\n`;
         } else {
           configHeader = `// --- FlapMain Arduino Hardware Config (config.h) ---\n#define WIFI_SSID "Your_WiFi_SSID"\n#define WIFI_PASSWORD "Your_WiFi_Password"\n\n#define FLAPMAIN_SERVER "${API_BASE_URL}"\n#define FLAPMAIN_DEVICE_ID "${newDevice.device_id}"\n#define FLAPMAIN_DEVICE_KEY "${data.apiKey}"\n`;
         }
@@ -633,6 +645,8 @@ function Devices() {
           )}
         </div>
       </header>
+
+      <DiscoveredDevices token={token} devices={devices} schemas={schemas} onChanged={fetchData} />
 
       {/* ── Category Tabs ───────────────────────────────────────────────────── */}
       <div style={{
@@ -963,6 +977,14 @@ function Devices() {
               <div className="form-group mb-0">
                 <label className="form-label">Minimum Usage Time</label>
                 <input type="text" className="form-input" placeholder="e.g. 24 hours" value={newDevice.min_usage || ''} onChange={e => setNewDevice({ ...newDevice, min_usage: e.target.value })} />
+              </div>
+              <div className="form-group mb-0">
+                <label className="form-label">GPS Latitude</label>
+                <input type="number" step="any" min="-90" max="90" className="form-input" placeholder="e.g. 27.7172" value={newDevice.latitude ?? ''} onChange={e => setNewDevice({ ...newDevice, latitude: e.target.value })} />
+              </div>
+              <div className="form-group mb-0">
+                <label className="form-label">GPS Longitude</label>
+                <input type="number" step="any" min="-180" max="180" className="form-input" placeholder="e.g. 85.3240" value={newDevice.longitude ?? ''} onChange={e => setNewDevice({ ...newDevice, longitude: e.target.value })} />
               </div>
             </div>
           </form>

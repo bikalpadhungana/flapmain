@@ -485,7 +485,12 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   postData += "\"mesh_hops_left\":" + String(pkt.ttl) + ",";
   postData += "\"alert_level\":" + String(pkt.alert_level) + ",";
   postData += "\"rssi\":" + String(rssi) + ",";
-  postData += "\"snr\":" + String(snr, 1);
+  postData += "\"snr\":" + String(snr, 1) + ",";
+  // Packet message ID lets the server drop copies received by other gateways.
+  postData += "\"msg_id\":" + String(((uint16_t)pkt.msgIdHi << 8) | pkt.msgIdLo);
+  // Receive time (Unix seconds) once NTP has synced; the server uses it as the reading time.
+  unsigned long epochNow = timeClient.getEpochTime();
+  if (epochNow > 1700000000UL) postData += ",\"received_at\":" + String(epochNow);
   postData += "}";
 
   Serial.printf("[Cloud Forward] Station Node #%d (%s) -> POST %s\n", pkt.originNode, nodeDeviceId.c_str(), url.c_str());
