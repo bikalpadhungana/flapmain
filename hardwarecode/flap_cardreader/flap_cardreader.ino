@@ -14,7 +14,7 @@
 #include <U8g2lib.h>
 
 // ===================== CONFIGURATION =====================
-#define FLAPMAIN_SERVER     "https://main.flap.com.np"
+#define FLAPMAIN_SERVER     "http://main.esainnovation.com:5003"
 #define FLAPMAIN_DEVICE_ID  "flap-card-w0f5"
 #define FLAPMAIN_DEVICE_KEY "flap_dev_dd27a6d26219108b50b8c5704fc94ef641da51089b13289a"
 
@@ -265,6 +265,25 @@ bool pingServer() {
   return (code >= 200 && code < 300);
 }
 
+// ===================== CARD USER PRINT =====================
+// Prints the cardholder info that the server looked up on flap.esainnovation.com
+// (returned as the "user" object in the /api/device/tap response).
+void printCardUser(const String& uid, JsonVariantConst user) {
+  Serial.println(F("=============== CARD TAPPED ==============="));
+  Serial.printf("%-14s: %s\n", "uid", uid.c_str());
+  JsonObjectConst obj = user.as<JsonObjectConst>();
+  if (obj.isNull() || obj.size() == 0) {
+    Serial.println(F("No user info returned (unregistered card or flap.esainnovation.com unreachable)"));
+  } else {
+    for (JsonPairConst kv : obj) {
+      Serial.printf("%-14s: ", kv.key().c_str());
+      if (kv.value().is<const char*>()) Serial.println(kv.value().as<const char*>());
+      else { serializeJson(kv.value(), Serial); Serial.println(); }
+    }
+  }
+  Serial.println(F("==========================================="));
+}
+
 // ===================== SETUP =====================
 void setup() {
   Serial.begin(115200);
@@ -418,6 +437,7 @@ void loop() {
     filter["status"] = true;
     filter["message"] = true;
     filter["display"] = true;
+    filter["user"] = true;
 
     JsonDocument resp;
     DeserializationError err = deserializeJson(resp, body, DeserializationOption::Filter(filter));
@@ -426,6 +446,7 @@ void loop() {
     filter["status"] = true;
     filter["message"] = true;
     filter["display"] = true;
+    filter["user"] = true;
 
     DynamicJsonDocument resp(3072);
     DeserializationError err = deserializeJson(resp, body, DeserializationOption::Filter(filter));
@@ -439,6 +460,7 @@ void loop() {
       Serial.println("[JSON ERROR] " + String(err.c_str()) + " | Body: " + body);
     } else {
       status = resp["status"] | "error";
+      printCardUser(uid, resp["user"]);
 
       if (resp["display"]) {
         line1 = resp["display"]["line1"] | "";
