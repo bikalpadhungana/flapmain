@@ -186,7 +186,10 @@ For dashboards requiring zero-latency telemetry streaming, connect using `socket
 ```javascript
 import { io } from 'socket.io-client';
 
-const socket = io('https://main.esainnovation.com');
+// Authenticate the socket with your partner API key (or a dashboard JWT via `auth: { token }`).
+const socket = io('https://main.esainnovation.com', {
+  auth: { apiKey: process.env.FLAPMAIN_API_KEY }
+});
 
 socket.on('connect', () => {
   console.log('[Socket.io] Connected to FlapMain Telemetry Stream');

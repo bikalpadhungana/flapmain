@@ -4,7 +4,7 @@ import {
   CreditCard, Weight, Thermometer, Wind, Camera, Radio, Zap, Activity,
   ChevronDown, ChevronRight, Users, CheckCircle, RefreshCw
 } from 'lucide-react';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, socketOptions } from '../config';
 import io from 'socket.io-client';
 
 // ─── Device type metadata ────────────────────────────────────────────────────
@@ -267,7 +267,7 @@ function SensorFusion() {
     const host = import.meta.env.DEV
       ? `http://${window.location.hostname}:5051`
       : window.location.origin;
-    socketRef.current = io(host, { transports: ['websocket', 'polling'] });
+    socketRef.current = io(host, socketOptions({ transports: ['websocket', 'polling'] }));
 
     socketRef.current.on('new_tap', (data) => {
       setLiveEvents(prev => [{ ...data, type: 'tap', timestamp: data.timestamp || new Date().toISOString() }, ...prev].slice(0, 20));

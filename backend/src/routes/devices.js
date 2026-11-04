@@ -1,12 +1,24 @@
 const express = require('express');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const Device = require('../models/Device');
 const DeviceType = require('../models/DeviceType');
 const Reading = require('../models/Reading');
 const TapLog = require('../models/TapLog');
 const Org = require('../models/Org');
 const FusionGroup = require('../models/FusionGroup');
-const { authenticateUser } = require('../middleware/auth');
+const MeshMessage = require('../models/MeshMessage');
+const {
+  authenticateUser,
+  authenticateUserOrApiKey,
+  checkDeviceKey,
+  enforceDeviceAuth,
+  extractDeviceKey,
+  requireDeviceOrUser,
+} = require('../middleware/auth');
+const { deviceAuthMode } = require('../config/security');
+const { evaluateAlertRules } = require('../services/alertEngine');
+const { checkOutboundUrl, postJson } = require('../services/outboundUrl');
 
 const router = express.Router();
 
@@ -21,6 +33,41 @@ let activeTapSession = null;
 
 // Active device trigger sessions (initiated via ScaleMonitor UI or external platform API triggers)
 const activeTriggerSessions = {}; // device_id -> triggerSession
+
+// Schema registry changes rarely; cache lookups instead of hitting Mongo per packet.
+const DEVICE_TYPE_CACHE_TTL_MS = 60 * 1000;
+const deviceTypeCache = new Map();
+const getDeviceTypeSchema = async (deviceType) => {
+  const hit = deviceTypeCache.get(deviceType);
+  if (hit && hit.exp > Date.now()) return hit.doc;
+  const doc = await DeviceType.findOne({ device_type: deviceType });
+  deviceTypeCache.set(deviceType, { doc, exp: Date.now() + DEVICE_TYPE_CACHE_TTL_MS });
+  return doc;
+};
+
+// Only write last_seen when it is stale; avoids a DB write per telemetry packet.
+const LAST_SEEN_WRITE_INTERVAL_MS = 15 * 1000;
+
+const SESSION_TTL_MS = 300000;
+const hasLiveTapSession = () =>
+  (activeTapSession && Date.now() - activeTapSession.timestamp < SESSION_TTL_MS) ||
+  Object.keys(activeFusionSessions).length > 0;
+
+// Strip secrets before a tap record leaves the server (socket / HTTP).
+const publicTap = (rec) => {
+  if (!rec) return rec;
+  const obj = typeof rec.toObject === 'function' ? rec.toObject() : { ...rec };
+  delete obj.api_key;
+  return obj;
+};
+
+// Neutralise spreadsheet formula injection and quote CSV cells.
+const csvCell = (v) => {
+  if (v === undefined || v === null) return '';
+  let s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
 
 
 // Telemetry Ingestion Handler (for ESP8266 Height+Weight Hardware and REST Clients)
@@ -59,10 +106,22 @@ const processTelemetry = async (req, res) => {
       }
     }
 
+    // Device authentication (DEVICE_AUTH_MODE: off | warn | enforce).
+    // A device may use its own key, or a relay key of another active device in the
+    // same org (the LoRa gateway forwards all mesh nodes with its own key).
+    const keyCheck = await checkDeviceKey(device, deviceKey);
+    if (device && !enforceDeviceAuth(req, res, keyCheck, `telemetry for ${device_id}`)) return;
+
     if (!device) {
-      const defaultOrg = (await Org.findOne({ slug: 'flap' })) || (await Org.findOne());
+      // Auto-provisioning from an unauthenticated public endpoint lets anyone
+      // create devices. In enforce mode only a known relay (gateway) may do it.
+      if (!keyCheck.ok && !enforceDeviceAuth(req, res, keyCheck, `auto-provision of ${device_id}`)) return;
+      const defaultOrg = keyCheck.relay
+        ? await Org.findById(keyCheck.relay.org_id)
+        : ((await Org.findOne({ slug: 'flap' })) || (await Org.findOne()));
       if (defaultOrg) {
-        const keyToHash = deviceKey || 'flap-key-001';
+        // Never fall back to a shared, well-known key.
+        const keyToHash = deviceKey || crypto.randomBytes(24).toString('hex');
         let detectedType = (req.body.device_type || '').toLowerCase();
         if (!detectedType) {
           if (req.body.wind_speed !== undefined || req.body.wind_direction !== undefined || device_id.includes('aws') || device_id.includes('weather')) {
@@ -130,12 +189,13 @@ const processTelemetry = async (req, res) => {
     }
 
     // 2. Fetch device schema
-    const schemaDoc = await DeviceType.findOne({ device_type: device.device_type });
-    
+    const schemaDoc = await getDeviceTypeSchema(device.device_type);
+
     // 3. Validate payload fields — unpack both top-level and nested data/payload wrappers
     const rawData = (typeof req.body.data === 'object' && req.body.data !== null) ? req.body.data : {};
     const rawPayload = (typeof req.body.payload === 'object' && req.body.payload !== null) ? req.body.payload : {};
-    const payload = { ...rawData, ...rawPayload, ...req.body };
+    const body = (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) ? req.body : {};
+    const payload = { ...rawData, ...rawPayload, ...body };
     const validatedPayload = {};
 
     if (schemaDoc && schemaDoc.fields) {
@@ -269,14 +329,18 @@ const processTelemetry = async (req, res) => {
     }
 
     // 4. Link with active card tap session & Fusion Group
+    // Skip the FusionGroup query entirely when no tap session is live (the common
+    // case for weather stations) — it previously ran on every telemetry packet.
     let matchedSession = activeTapSession;
-    try {
-      const fusionGroup = await FusionGroup.findOne({ device_ids: device_id });
-      if (fusionGroup && activeFusionSessions[fusionGroup._id.toString()]) {
-        matchedSession = activeFusionSessions[fusionGroup._id.toString()];
+    if (hasLiveTapSession()) {
+      try {
+        const fusionGroup = await FusionGroup.findOne({ device_ids: device_id }).select('_id').lean();
+        if (fusionGroup && activeFusionSessions[fusionGroup._id.toString()]) {
+          matchedSession = activeFusionSessions[fusionGroup._id.toString()];
+        }
+      } catch (fErr) {
+        console.warn('Error querying Fusion Group for scale telemetry:', fErr.message);
       }
-    } catch (fErr) {
-      console.warn('Error querying Fusion Group for scale telemetry:', fErr.message);
     }
 
     if (matchedSession && (Date.now() - matchedSession.timestamp < 300000)) {
@@ -335,18 +399,10 @@ const processTelemetry = async (req, res) => {
           timestamp: new Date().toISOString()
         };
 
-        // Fire-and-forget async fetch call to external platform API
-        fetch(callbackUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'FlapMain-IoT-Engine/2.3'
-          },
-          body: JSON.stringify(callbackPayload)
-        }).then(cbRes => {
-          console.log(`[EXTERNAL WEBHOOK DELIVERED]: Posted reading to ${callbackUrl} (HTTP ${cbRes.status})`);
-        }).catch(cbErr => {
-          console.warn(`[EXTERNAL WEBHOOK ERROR]: Failed to post to ${callbackUrl}: ${cbErr.message}`);
+        // Fire-and-forget POST to the external platform (SSRF-guarded, 5s timeout)
+        postJson(callbackUrl, callbackPayload).then((r) => {
+          if (r.ok) console.log(`[EXTERNAL WEBHOOK DELIVERED]: Posted reading to ${callbackUrl} (HTTP ${r.status})`);
+          else console.warn(`[EXTERNAL WEBHOOK ERROR]: ${callbackUrl}: ${r.error || `HTTP ${r.status}`}`);
         });
       }
     }
@@ -360,11 +416,13 @@ const processTelemetry = async (req, res) => {
       payload: validatedPayload,
     });
 
-    // 6. Update device connection stats for the matched device
-    await Device.updateOne(
-      { _id: device._id },
-      { $set: { status: 'online', last_seen: new Date() } }
-    );
+    // 6. Update device connection stats (throttled)
+    if (device.status !== 'online' || !device.last_seen || Date.now() - new Date(device.last_seen).getTime() > LAST_SEEN_WRITE_INTERVAL_MS) {
+      await Device.updateOne(
+        { _id: device._id },
+        { $set: { status: 'online', last_seen: new Date() } }
+      );
+    }
 
     // Emit Socket.io event for real-time dashboards
     try {
@@ -421,6 +479,11 @@ const processTelemetry = async (req, res) => {
       console.warn('Could not emit Socket.io event:', wsErr.message);
     }
 
+    // 7. Alert rules (fire-and-forget; previously only evaluated in the disabled MQTT path)
+    let ioRef = null;
+    try { ioRef = require('../socket').getIO(); } catch (_) { /* not initialised */ }
+    evaluateAlertRules(device, validatedPayload, ioRef);
+
     res.status(201).json({ status: 'ok', message: 'Telemetry reading logged successfully', reading });
   } catch (error) {
     console.error('REST ingestion error:', error);
@@ -449,10 +512,16 @@ const cameraFlashState = {};
 // @route   POST /api/v1/devices/:device_id/control
 // @desc    Control device hardware parameters (e.g. Flash LED ON/OFF)
 // @access  Public / Private
-router.post('/:device_id/control', async (req, res) => {
+const CONTROL_VARIABLES = new Set(['flash', 'led', 'led_intensity', 'framesize', 'quality', 'brightness', 'contrast']);
+const SAFE_HOST = /^[a-zA-Z0-9.-]+(:\d{1,5})?$/;
+
+router.post('/:device_id/control', authenticateUser, async (req, res) => {
   const { device_id } = req.params;
-  const variable = req.body.variable || req.body.var || 'flash';
+  const variable = String(req.body.variable || req.body.var || 'flash');
   const val = req.body.val !== undefined ? Number(req.body.val) : (req.body.flash ? 1 : 0);
+  if (!CONTROL_VARIABLES.has(variable) || !Number.isFinite(val)) {
+    return res.status(400).json({ status: 'error', message: 'Unsupported control variable or value' });
+  }
 
   if (variable === 'flash' || variable === 'led' || variable === 'led_intensity') {
     cameraFlashState[device_id] = val;
@@ -460,11 +529,14 @@ router.post('/:device_id/control', async (req, res) => {
 
   // Attempt direct local IP HTTP request to device if IP is stored
   try {
-    const deviceDoc = await Device.findOne({ device_id });
+    const deviceDoc = await Device.findOne({ device_id, org_id: req.org_id });
+    if (!deviceDoc) {
+      return res.status(404).json({ status: 'error', message: 'Device not found' });
+    }
     const lastTel = await Reading.findOne({ device_id }).sort({ timestamp: -1 });
-    const ip = (lastTel && lastTel.payload && lastTel.payload.ip_address) || (deviceDoc && deviceDoc.ip_address);
-    if (ip) {
-      fetch(`http://${ip}/control?var=${variable}&val=${val}`).catch(() => {});
+    const ip = (lastTel && lastTel.payload && lastTel.payload.ip_address) || deviceDoc.ip_address;
+    if (ip && SAFE_HOST.test(ip)) {
+      fetch(`http://${ip}/control?var=${encodeURIComponent(variable)}&val=${val}`).catch(() => {});
       fetch(`http://${ip}/control?var=flash&val=${val}`).catch(() => {});
       fetch(`http://${ip}/control?var=led_intensity&val=${val}`).catch(() => {});
     }
@@ -483,7 +555,7 @@ router.post('/:device_id/control', async (req, res) => {
 // @route   POST /v1/devices/camera/upload
 // @desc    Direct JPEG image frame upload endpoint for ESP32-CAM and remote clients
 // @access  Public (Authenticated via Device Headers or Query)
-router.post('/camera/upload', async (req, res) => {
+router.post('/camera/upload', requireDeviceOrUser, async (req, res) => {
   const device_id = req.headers['x-device-id'] || req.headers['device_id'] || req.query.device_id || (req.body && req.body.device_id) || 'flap-esp32-cam-001';
   let imgBuffer = null;
 
@@ -724,7 +796,7 @@ router.get('/:device_id/readings/latest', authenticateUser, async (req, res) => 
 // @access  Private (Dashboard user)
 router.get('/:device_id/readings', authenticateUser, async (req, res) => {
   const { from, to, limit } = req.query;
-  const queryLimit = parseInt(limit, 10) || 100;
+  const queryLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 5000);
 
   try {
     const device = await Device.findOne({ device_id: req.params.device_id, org_id: req.org_id });
@@ -859,9 +931,10 @@ router.patch('/:device_id/activate', authenticateUser, async (req, res) => {
 // @route   GET /v1/devices/stations/all
 // @desc    Get all registered weather stations with their node IDs and locations
 // @access  Public / Authenticated
-router.get('/stations/all', async (req, res) => {
+router.get('/stations/all', authenticateUser, async (req, res) => {
   try {
-    const stations = await Device.find({ 
+    const stations = await Device.find({
+      org_id: req.org_id,
       $or: [
         { device_type: 'weather_station_v1' },
         { node_id: { $ne: null } }
@@ -941,13 +1014,13 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
       const schemaDoc = await DeviceType.findOne({ device_type: device.device_type });
       const fieldNames = schemaDoc ? Array.from(schemaDoc.fields.keys()) : [];
 
-      fieldNames.forEach(f => { csvContent += `,${f}`; });
+      fieldNames.forEach(f => { csvContent += `,${csvCell(f)}`; });
       csvContent += '\n';
 
       readings.forEach(r => {
         let row = `${r.timestamp.toISOString()},${r.device_id},${r.device_type}`;
         fieldNames.forEach(f => {
-          row += `,${r.payload[f] !== undefined ? r.payload[f] : ''}`;
+          row += `,${csvCell(r.payload ? r.payload[f] : undefined)}`;
         });
         csvContent += row + '\n';
       });
@@ -963,18 +1036,6 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
     console.error('Export telemetry error:', error);
     res.status(500).json({ message: 'Server error exporting data' });
   }
-});
-
-// @route   GET /ping
-// @desc    Ping device health check endpoint
-// @access  Public
-router.get('/ping', (req, res) => {
-  res.json({
-    status: 'online',
-    message: 'Device interface reachable',
-    timestamp: new Date(),
-    ip: req.ip,
-  });
 });
 
   // In-memory fallback log store if MongoDB is offline
@@ -1032,14 +1093,18 @@ router.get('/ping', (req, res) => {
       timestamp: new Date(),
     };
 
-    console.log('[FLAPMAIN LOCAL TAP INGESTED]:', tapPayload);
+    console.log('[FLAPMAIN LOCAL TAP INGESTED]:', { ...tapPayload, api_key: tapPayload.api_key ? '***' : '' });
+
+    // Keep the raw device key only when an edge node must pass it through to the
+    // legacy VPS (no dedicated FLAP_SERVER_API_KEY). Otherwise don't store secrets.
+    const needsKeyPassthrough = (process.env.NODE_ROLE || 'cloud') === 'edge' && !process.env.FLAP_SERVER_API_KEY;
 
     // 1. SAVE TAP RECORD LOCALLY ON LOCAL SYSTEM FIRST
     let savedRecord = null;
     try {
       savedRecord = await TapLog.create({
         uid: uidStr,
-        api_key: tapPayload.api_key || '',
+        api_key: needsKeyPassthrough ? (tapPayload.api_key || '') : '',
         tag_type: tapPayload.tag_type,
         type: tapPayload.type,
         flapid: tapPayload.flapid,
@@ -1050,8 +1115,9 @@ router.get('/ping', (req, res) => {
       console.log('[SAVED TAP TO LOCAL DB]:', savedRecord._id);
     } catch (dbErr) {
       console.warn('[LOCAL DB SAVE FALLBACK TO MEMORY]:', dbErr.message);
-      savedRecord = { _id: Date.now().toString(), ...tapPayload };
+      savedRecord = { _id: Date.now().toString(), ...tapPayload, api_key: undefined };
       inMemoryTapLogs.unshift(savedRecord);
+      if (inMemoryTapLogs.length > 500) inMemoryTapLogs.length = 500;
     }
 
     // 2. SAVE TO DEVICE TELEMETRY READINGS (for Dashboard UI) & UPDATE LAST SEEN
@@ -1171,7 +1237,7 @@ router.get('/ping', (req, res) => {
     // 5. EMIT REAL-TIME WEBSOCKET EVENT TO DASHBOARD
     try {
       const io = require('../socket').getIO();
-      io.emit('new_tap', savedRecord || tapPayload);
+      io.emit('new_tap', publicTap(savedRecord || tapPayload));
     } catch (wsErr) {
       console.warn('Could not emit Socket.io event:', wsErr.message);
     }
@@ -1256,9 +1322,10 @@ router.get('/ping', (req, res) => {
   // @route   GET /tap/logs
   // @desc    Get all tap records saved locally on this local system
   // @access  Public
-  router.get('/tap/logs', async (req, res) => {
+  router.get('/tap/logs', authenticateUser, async (req, res) => {
     try {
-      const dbLogs = await TapLog.find().sort({ timestamp: -1 }).limit(20);
+      const orgDeviceIds = await Device.find({ org_id: req.org_id }).distinct('device_id');
+      const dbLogs = await TapLog.find({ device_id: { $in: orgDeviceIds } }).sort({ timestamp: -1 }).limit(20);
       res.json({
         source: 'MongoDB',
         count: dbLogs.length,
@@ -1296,7 +1363,7 @@ router.post(['/tags/lookup', '/lookup'], (req, res) => {
 // @route   POST /api/v1/devices/trigger
 // @desc    Initiate scale measurement session for device & register optional external webhook callback
 // @access  Public / Authenticated
-router.post(['/trigger', '/:device_id/trigger'], async (req, res) => {
+router.post(['/trigger', '/:device_id/trigger'], authenticateUserOrApiKey, async (req, res) => {
   const device_id = req.params.device_id || req.body.device_id;
   const { external_user_id, user_name, callback_url, notes } = req.body;
 
@@ -1305,18 +1372,26 @@ router.post(['/trigger', '/:device_id/trigger'], async (req, res) => {
   }
 
   try {
-    const device = await Device.findOne({ device_id });
+    const device = await Device.findOne({ device_id, org_id: req.org_id });
     if (!device) {
       return res.status(404).json({ status: 'error', message: `Device '${device_id}' not found in system registry` });
     }
 
-    const sessionId = 'trig_' + Date.now();
+    const requestedCallback = callback_url || req.body.webhook_url || null;
+    if (requestedCallback) {
+      const reason = await checkOutboundUrl(requestedCallback);
+      if (reason) {
+        return res.status(400).json({ status: 'error', message: `callback_url rejected: ${reason}` });
+      }
+    }
+
+    const sessionId = 'trig_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
     const sessionObj = {
       session_id: sessionId,
       device_id,
       external_user_id: external_user_id || req.body.user_id || 'EXTERNAL_USER',
       user_name: user_name || req.body.name || external_user_id || 'External User',
-      callback_url: callback_url || req.body.webhook_url || null,
+      callback_url: requestedCallback,
       notes: notes || '',
       timestamp: Date.now(),
       status: 'initiated'
@@ -1357,7 +1432,7 @@ router.post(['/trigger', '/:device_id/trigger'], async (req, res) => {
 // @route   GET /api/v1/devices/:device_id/trigger-status
 // @desc    Poll trigger status for scale hardware or external integrations
 // @access  Public
-router.get(['/:device_id/trigger-status', '/trigger-status'], (req, res) => {
+router.get(['/:device_id/trigger-status', '/trigger-status'], authenticateUserOrApiKey, (req, res) => {
   const device_id = req.params.device_id || req.query.device_id;
   const session = activeTriggerSessions[device_id];
 
@@ -1380,22 +1455,21 @@ router.get(['/:device_id/trigger-status', '/trigger-status'], (req, res) => {
 // @route   GET /logs/system
 // @desc    Get aggregated system activity logs across all devices, taps, telemetry & schemas
 // @access  Public / Authenticated
-router.get('/logs/system', async (req, res) => {
+router.get('/logs/system', authenticateUser, async (req, res) => {
   const { limit, event_type, device_id, search } = req.query;
-  const maxLogs = parseInt(limit, 10) || 100;
+  const maxLogs = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 1000);
 
   try {
-    const devices = await Device.find().select('device_id name device_type status last_seen location');
+    const devices = await Device.find({ org_id: req.org_id }).select('device_id name device_type status last_seen location').lean();
     const deviceMap = new Map(devices.map(d => [d.device_id, d]));
 
     // 1. Fetch Telemetry Readings
-    const readingsFilter = {};
-    if (device_id) readingsFilter.device_id = device_id;
+    const readingsFilter = { org_id: req.org_id };
+    if (device_id) readingsFilter.device_id = String(device_id);
     const readings = await Reading.find(readingsFilter).sort({ timestamp: -1 }).limit(maxLogs);
 
     // 2. Fetch Tap Logs
-    const tapFilter = {};
-    if (device_id) tapFilter.device_id = device_id;
+    const tapFilter = { device_id: device_id && deviceMap.has(String(device_id)) ? String(device_id) : { $in: [...deviceMap.keys()] } };
     const tapLogs = await TapLog.find(tapFilter).sort({ timestamp: -1 }).limit(maxLogs);
 
     // 3. Format Telemetry entries
@@ -1475,37 +1549,59 @@ router.get('/logs/system', async (req, res) => {
 });
 
 // ---- LORA MESH TWO-WAY WALKIE-TALKIE & OUTBOX QUEUE ENDPOINTS ----
-let meshOutboxQueue = [];
-let meshMessageHistory = [];
+// Persisted in MongoDB (MeshMessage) so SOS history and queued downlinks
+// survive restarts. Downlinks are retried a bounded number of times so an
+// un-acked message does not re-flood the mesh forever.
+const OUTBOX_MAX_ATTEMPTS = 20;
+const OUTBOX_MAX_AGE_MS = 60 * 60 * 1000;
+
+const toClientMessage = (m) => ({
+  _id: String(m._id),
+  gateway_id: m.gateway_id,
+  device_id: m.device_id,
+  origin_node: m.origin_node,
+  target_node: m.target_node,
+  message_type: m.message_type,
+  text: m.text,
+  alert_level: m.alert_level,
+  battery_mv: m.battery_mv,
+  hops_left: m.hops_left,
+  rssi: m.rssi,
+  snr: m.snr,
+  is_downlink: m.direction === 'downlink' || undefined,
+  timestamp: new Date(m.timestamp).toISOString(),
+});
+
+const recentMeshMessages = async (limit = 100) => {
+  const docs = await MeshMessage.find().sort({ timestamp: -1 }).limit(limit).lean();
+  return docs.reverse().map(toClientMessage);
+};
 
 /**
  * @route   POST /v1/devices/messages
  * @desc    Uplink endpoint for ESP Gateway to post text/SOS messages from LoRa Mesh walkie-talkies
  */
-router.post('/messages', async (req, res) => {
+router.post('/messages', requireDeviceOrUser, async (req, res) => {
   try {
     const { gateway_id, origin_node, target_node, message_type, text, alert_level, battery_mv, hops_left, rssi, snr } = req.body;
     
     console.log(`[LORA MESH UPLINK MESSAGE]: Node #${origin_node} -> Target #${target_node || 0} (${message_type}): "${text}" (Alert: ${alert_level}, RSSI: ${rssi}dBm)`);
 
-    const msgData = {
-      _id: new Date().getTime().toString() + Math.random().toString().substring(2, 6),
-      gateway_id: gateway_id || 'esp_gateway_node_01',
+    const doc = await MeshMessage.create({
+      direction: 'uplink',
+      gateway_id: String(gateway_id || 'esp_gateway_node_01'),
       device_id: `flap-walkie-${String(origin_node).padStart(3, '0')}`,
       origin_node: Number(origin_node) || 0,
       target_node: Number(target_node) || 0,
-      message_type: message_type || 'text',
-      text: String(text || ''),
+      message_type: String(message_type || 'text'),
+      text: String(text || '').substring(0, 256),
       alert_level: Number(alert_level) || 0,
       battery_mv: Number(battery_mv) || 0,
       hops_left: Number(hops_left) || 0,
       rssi: Number(rssi) || 0,
       snr: Number(snr) || 0,
-      timestamp: new Date().toISOString()
-    };
-
-    meshMessageHistory.push(msgData);
-    if (meshMessageHistory.length > 100) meshMessageHistory.shift();
+    });
+    const msgData = toClientMessage(doc);
 
     // Broadcast real-time Socket.io events
     const io = req.app.get('io');
@@ -1558,41 +1654,38 @@ router.post('/messages', async (req, res) => {
  * @route   POST /v1/devices/send-message
  * @desc    Send a message from FlapMain Cloud web app down to LoRa Mesh walkie-talkie devices
  */
-router.post('/send-message', async (req, res) => {
+router.post('/send-message', authenticateUser, async (req, res) => {
   try {
     const { target_node, text, alert_level, gateway_id } = req.body;
     if (!text || String(text).trim().length === 0) {
       return res.status(400).json({ status: 'error', message: 'Text message cannot be empty' });
     }
 
-    const outboxItem = {
-      outbox_id: 'out_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
-      gateway_id: gateway_id || 'esp_gateway_node_01',
-      target_node: Number(target_node) || 0,
-      text: String(text).trim().substring(0, 31),
-      alert_level: Number(alert_level) || 0,
-      delivered: false,
-      createdAt: new Date().toISOString()
-    };
-
-    meshOutboxQueue.push(outboxItem);
-    console.log(`[LORA MESH DOWNLINK QUEUED]: ID ${outboxItem.outbox_id} for Target #${outboxItem.target_node}: "${outboxItem.text}"`);
-
-    const msgData = {
-      _id: outboxItem.outbox_id,
-      gateway_id: outboxItem.gateway_id,
+    const alertLvl = Number(alert_level) || 0;
+    const doc = await MeshMessage.create({
+      direction: 'downlink',
+      gateway_id: String(gateway_id || 'esp_gateway_node_01'),
       device_id: 'Cloud Base Station (Web Dashboard)',
       origin_node: 0,
-      target_node: outboxItem.target_node,
-      message_type: outboxItem.alert_level > 0 ? 'sos' : 'text',
-      text: outboxItem.text,
-      alert_level: outboxItem.alert_level,
-      is_downlink: true,
-      timestamp: outboxItem.createdAt
+      target_node: Number(target_node) || 0,
+      message_type: alertLvl > 0 ? 'sos' : 'text',
+      // LoRa packet text field is 32 bytes incl. NUL
+      text: String(text).trim().substring(0, 31),
+      alert_level: alertLvl,
+      delivered: false,
+    });
+    const outboxItem = {
+      outbox_id: String(doc._id),
+      gateway_id: doc.gateway_id,
+      target_node: doc.target_node,
+      text: doc.text,
+      alert_level: doc.alert_level,
+      delivered: false,
+      createdAt: doc.timestamp.toISOString(),
     };
+    console.log(`[LORA MESH DOWNLINK QUEUED]: ID ${outboxItem.outbox_id} for Target #${outboxItem.target_node}: "${outboxItem.text}"`);
 
-    meshMessageHistory.push(msgData);
-    if (meshMessageHistory.length > 100) meshMessageHistory.shift();
+    const msgData = toClientMessage(doc);
 
     // Broadcast Socket.io event so web UI displays outgoing chat instantly
     const io = req.app.get('io');
@@ -1625,18 +1718,25 @@ router.post('/send-message', async (req, res) => {
  * @route   GET /v1/devices/messages/history
  * @desc    Fetch recent LoRa Mesh chat/text/SOS message history
  */
-router.get('/messages/history', (req, res) => {
-  res.json({ status: 'success', messages: meshMessageHistory });
+router.get('/messages/history', authenticateUser, async (req, res) => {
+  try {
+    res.json({ status: 'success', messages: await recentMeshMessages(100) });
+  } catch (err) {
+    console.error('Error fetching mesh history:', err);
+    res.status(500).json({ status: 'error', message: 'Failed to fetch mesh message history' });
+  }
 });
 
 /**
  * @route   GET /v1/devices/sos/history
  * @desc    Fetch unified Emergency SOS alert history across both Walkies and Weather Station telemetry
  */
-router.get('/sos/history', async (req, res) => {
+router.get('/sos/history', authenticateUser, async (req, res) => {
   try {
     // 1. SOS alerts from LoRa Mesh Walkie-Talkies
-    const meshSos = meshMessageHistory.filter(m => (m.alert_level && m.alert_level > 0) || m.message_type === 'sos').map(m => ({
+    const meshSosDocs = await MeshMessage.find({ $or: [{ alert_level: { $gt: 0 } }, { message_type: 'sos' }] })
+      .sort({ timestamp: -1 }).limit(100).lean();
+    const meshSos = meshSosDocs.map(toClientMessage).map(m => ({
       _id: m._id,
       source: 'mesh_message',
       source_type: 'LoRa Walkie-Talkie',
@@ -1655,6 +1755,7 @@ router.get('/sos/history', async (req, res) => {
 
     // 2. SOS alerts from MongoDB Reading collection (Weather Stations & Hardware nodes)
     const telemetrySosDocs = await Reading.find({
+      org_id: req.org_id,
       $or: [
         { 'payload.alert_level': { $gt: 0 } },
         { 'payload.text_msg': { $regex: /sos|emergency/i } }
@@ -1713,19 +1814,31 @@ router.get('/sos/history', async (req, res) => {
  * @route   GET /v1/devices/:id/outbox
  * @desc    Poll pending downlink outbox messages for ESP Gateway
  */
-router.get('/:id/outbox', (req, res) => {
-  const pending = meshOutboxQueue.find(m => !m.delivered);
+router.get('/:id/outbox', requireDeviceOrUser, async (req, res) => {
+  try {
+    // Oldest undelivered downlink that is still within its retry budget and age.
+    const pending = await MeshMessage.findOneAndUpdate(
+      {
+        direction: 'downlink',
+        delivered: false,
+        delivery_attempts: { $lt: OUTBOX_MAX_ATTEMPTS },
+        timestamp: { $gte: new Date(Date.now() - OUTBOX_MAX_AGE_MS) },
+      },
+      { $inc: { delivery_attempts: 1 } },
+      { sort: { timestamp: 1 }, new: true }
+    ).lean();
 
-  if (pending) {
+    if (!pending) return res.json({ has_message: false });
     res.json({
       has_message: true,
-      outbox_id: pending.outbox_id,
+      outbox_id: String(pending._id),
       target_node: pending.target_node,
       text: pending.text,
       alert_level: pending.alert_level
     });
-  } else {
-    res.json({ has_message: false });
+  } catch (err) {
+    console.error('Outbox poll error:', err);
+    res.status(500).json({ has_message: false });
   }
 });
 
@@ -1733,9 +1846,12 @@ router.get('/:id/outbox', (req, res) => {
  * @route   POST /v1/devices/outbox/:outboxId/ack
  * @desc    Acknowledge that a queued outbox message was transmitted over 433MHz LoRa
  */
-router.post('/outbox/:outboxId/ack', (req, res) => {
+router.post('/outbox/:outboxId/ack', requireDeviceOrUser, async (req, res) => {
   const { outboxId } = req.params;
-  meshOutboxQueue = meshOutboxQueue.filter(m => m.outbox_id !== outboxId);
+  if (!mongoose.isValidObjectId(outboxId)) {
+    return res.status(400).json({ status: 'error', message: 'Invalid outbox id' });
+  }
+  await MeshMessage.updateOne({ _id: outboxId, direction: 'downlink' }, { $set: { delivered: true } }).catch(() => {});
   console.log(`[LORA MESH DOWNLINK ACKNOWLEDGED]: Message ${outboxId} delivered to mesh.`);
   res.json({ status: 'success', message: 'Outbox message acknowledged' });
 });
@@ -1745,13 +1861,13 @@ router.post('/outbox/:outboxId/ack', (req, res) => {
  * @desc    Fetch historical weather & sensor telemetry for graph time ranges (live, 3h, 6h, 12h, 24h, 7d, 30d)
  *          Supports filtering by origin_node (LoRa mesh station ID) and device_id
  */
-router.get('/telemetry/history', async (req, res) => {
+router.get('/telemetry/history', authenticateUser, async (req, res) => {
   try {
     const { range = '3h', device_id, origin_node, start_date, end_date, limit = 1000 } = req.query;
 
-    const filter = {};
+    const filter = { org_id: req.org_id };
     if (device_id && device_id !== 'all') {
-      filter.device_id = device_id;
+      filter.device_id = String(device_id);
     } else {
       // If fetching weather telemetry across nodes, ensure we only match weather telemetry records
       filter.$or = [
@@ -1907,6 +2023,7 @@ router.get('/telemetry/history', async (req, res) => {
 
     // Query registered weather stations to include station metadata (names & locations)
     const registeredStations = await Device.find({
+      org_id: req.org_id,
       $or: [
         { device_type: 'weather_station_v1' },
         { node_id: { $ne: null } }

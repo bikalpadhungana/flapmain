@@ -5,7 +5,7 @@ import {
   Filter, ArrowRight, CornerDownLeft, Bell, Shield, Activity, Check, Copy,
   Compass, Thermometer, Wind, Flame, Download, Eye, ExternalLink, X
 } from 'lucide-react';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, authHeaders, socketOptions } from '../config';
 import { io } from 'socket.io-client';
 
 const INITIAL_REGISTERED_NODES = [
@@ -73,7 +73,7 @@ const SosAlert = () => {
   // 1. Fetch unified SOS history and Walkie chat messages on mount
   useEffect(() => {
     // A. Fetch unified SOS alerts history
-    fetch(`${baseApiUrl}/v1/devices/sos/history`)
+    fetch(`${baseApiUrl}/v1/devices/sos/history`, { headers: authHeaders() })
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -91,7 +91,7 @@ const SosAlert = () => {
       })
       .catch(() => {
         // Fallback: Query telemetry history directly if /sos/history endpoint is pending
-        fetch(`${baseApiUrl}/v1/devices/telemetry/history?range=30d&limit=250`)
+        fetch(`${baseApiUrl}/v1/devices/telemetry/history?range=30d&limit=250`, { headers: authHeaders() })
           .then(res => res.json())
           .then(tData => {
             if (tData.readings && Array.isArray(tData.readings)) {
@@ -132,7 +132,7 @@ const SosAlert = () => {
       });
 
     // B. Fetch Walkie-Talkie Mesh message history
-    fetch(`${baseApiUrl}/v1/devices/messages/history`)
+    fetch(`${baseApiUrl}/v1/devices/messages/history`, { headers: authHeaders() })
       .then(res => res.json())
       .then(data => {
         if (data.messages && Array.isArray(data.messages)) {
@@ -154,7 +154,7 @@ const SosAlert = () => {
 
   // 2. Real-time Socket.io Live Stream Listeners
   useEffect(() => {
-    const socket = io(baseApiUrl.replace(/\/api$/, ''));
+    const socket = io(baseApiUrl.replace(/\/api$/, ''), socketOptions());
 
     socket.on('connect', () => {
       setIsConnected(true);
@@ -285,7 +285,7 @@ const SosAlert = () => {
     try {
       const res = await fetch(`${baseApiUrl}/v1/devices/send-message`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           target_node: targetNode,
           text: textToSend || 'CRITICAL EMERGENCY SOS BROADCAST FROM BASE STATION!',

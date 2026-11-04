@@ -10,6 +10,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const swaggerUi = require('swagger-ui-express');
 const connectDB = require('./config/db');
+const { ALLOWED_ORIGINS, getJwtSecret, deviceAuthMode, socketAuthMode } = require('./config/security');
 const { startVpsSyncWorker } = require('./workers/vpsSyncWorker');
 
 const authRoutes = require('./routes/auth');
@@ -23,6 +24,10 @@ const fusionGroupRoutes = require('./routes/fusionGroups');
 const swaggerDocument = require('./config/swagger.json');
 
 const app = express();
+
+// Fail fast if JWT_SECRET is missing (and log loudly if it is a known default).
+getJwtSecret();
+console.log(`[SECURITY] DEVICE_AUTH_MODE=${deviceAuthMode()} SOCKET_AUTH_MODE=${socketAuthMode()}`);
 
 // Connect to MongoDB
 connectDB()
@@ -59,19 +64,17 @@ app.use(helmet({
 
 // Configure CORS for local development and production
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://localhost:5173',
-    'http://localhost:5174',
-    'https://localhost:5174',
-    'https://main.flap.com.np'
-  ],
+  origin: ALLOWED_ORIGINS,
   credentials: true
 }));
 
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ limit: '25mb', extended: true }));
-app.use(express.raw({ type: ['image/jpeg', 'image/png', 'application/octet-stream'], limit: '25mb' }));
+// Body parsing: telemetry/JSON payloads are tiny, so keep a 1MB cap globally.
+// Only the camera upload endpoint needs large bodies (JPEG frames / base64).
+const smallJson = express.json({ limit: '1mb' });
+const largeJson = express.json({ limit: '10mb' });
+app.use((req, res, next) => (req.path.endsWith('/camera/upload') ? largeJson : smallJson)(req, res, next));
+app.use(express.urlencoded({ limit: '1mb', extended: true }));
+app.use(express.raw({ type: ['image/jpeg', 'image/png', 'application/octet-stream'], limit: '10mb' }));
 
 // Graceful JSON & body parser error handler for device payloads containing control characters
 app.use((err, req, res, next) => {
@@ -158,6 +161,8 @@ const PORT = process.env.PORT || 5051;
 const http = require('http');
 const server = http.createServer(app);
 const io = require('./socket').init(server);
+// Make io reachable from routes via req.app.get('io') (used by the LoRa mesh uplink/downlink routes).
+app.set('io', io);
 
 io.on('connection', (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id}`);

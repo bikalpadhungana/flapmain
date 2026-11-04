@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, RefreshCw, Terminal, Download, Radio, ShieldAlert, Cpu, Filter, Layers, Copy, Check } from 'lucide-react';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, authHeaders } from '../config';
 
 function SystemLogs() {
   const [logs, setLogs] = useState([]);
@@ -70,7 +70,7 @@ function SystemLogs() {
       if (selectedDevice !== 'all') url += `&device_id=${selectedDevice}`;
       if (searchTerm) url += `&search=${encodeURIComponent(searchTerm)}`;
 
-      const res = await fetch(url);
+      const res = await fetch(url, { headers: authHeaders() });
       const data = await res.json();
       if (data.status === 'success') {
         setLogs(Array.isArray(data.logs) ? data.logs : []);

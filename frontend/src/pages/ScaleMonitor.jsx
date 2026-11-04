@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Activity, Radio, RefreshCw, Ruler, Weight, Wifi, WifiOff, Clock, Zap, Send, CheckCircle, ExternalLink, Play, AlertCircle } from 'lucide-react';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, socketOptions } from '../config';
 import { io } from 'socket.io-client';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
@@ -25,7 +25,7 @@ const ScaleMonitor = () => {
   useEffect(() => {
     let socket;
     if (isPolling) {
-      socket = io(API_BASE_URL.replace(/\/api$/, ''));
+      socket = io(API_BASE_URL.replace(/\/api$/, ''), socketOptions());
 
       socket.on('connect', () => {
         console.log('[ScaleMonitor] Connected to real-time telemetry stream');
