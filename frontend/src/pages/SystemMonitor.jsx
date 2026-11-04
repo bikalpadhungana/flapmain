@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Server, Activity, CheckCircle2, XCircle, ArrowRight, Radio, RefreshCw } from 'lucide-react';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, authHeaders, socketOptions } from '../config';
 
 import { io } from 'socket.io-client';
 
@@ -12,7 +12,7 @@ const SystemMonitor = () => {
 
   const fetchLogs = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/device/tap/logs`);
+      const response = await fetch(`${API_BASE_URL}/device/tap/logs`, { headers: authHeaders() });
       const data = await response.json();
       if (data && data.logs) {
         setLogs(data.logs);
@@ -31,7 +31,7 @@ const SystemMonitor = () => {
     let socket;
     if (isPolling) {
       // Connect to the Socket.io server without the /api path
-      socket = io(API_BASE_URL.replace(/\/api$/, ''));
+      socket = io(API_BASE_URL.replace(/\/api$/, ''), socketOptions());
       
       socket.on('connect', () => {
         console.log('Connected to real-time telemetry stream');

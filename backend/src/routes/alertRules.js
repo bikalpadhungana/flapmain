@@ -2,6 +2,7 @@ const express = require('express');
 const AlertRule = require('../models/AlertRule');
 const Device = require('../models/Device');
 const { authenticateUser } = require('../middleware/auth');
+const { invalidateRuleCache } = require('../services/alertEngine');
 
 const router = express.Router();
 
@@ -17,7 +18,7 @@ router.post('/', authenticateUser, async (req, res) => {
 
   // Validate condition
   const { field, operator, value } = condition;
-  if (!field || !operator || !value || !['>', '<', '==', '!='].includes(operator)) {
+  if (!field || !operator || value === undefined || value === null || value === '' || !['>', '<', '==', '!='].includes(operator)) {
     return res.status(400).json({ message: 'Invalid condition parameters. Operator must be >, <, ==, or !=' });
   }
 
@@ -42,6 +43,7 @@ router.post('/', authenticateUser, async (req, res) => {
       enabled: enabled !== undefined ? enabled : true,
     });
 
+    invalidateRuleCache(device_id);
     res.status(201).json(rule);
   } catch (error) {
     console.error('Create alert rule error:', error);
@@ -76,6 +78,7 @@ router.delete('/:id', authenticateUser, async (req, res) => {
       return res.status(404).json({ message: 'Alert rule not found or unauthorized' });
     }
 
+    invalidateRuleCache();
     res.json({ message: 'Alert rule deleted successfully' });
   } catch (error) {
     console.error('Delete alert rule error:', error);

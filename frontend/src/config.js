@@ -10,3 +10,25 @@ if (!rawUrl.endsWith('/api')) {
 }
 
 export const API_BASE_URL = rawUrl;
+
+// Auth helpers shared by pages. The backend requires a dashboard JWT on
+// history/log endpoints and on the Socket.io handshake.
+export const getToken = () => {
+  try {
+    return localStorage.getItem('token') || '';
+  } catch {
+    return '';
+  }
+};
+
+export const authHeaders = (extra = {}) => {
+  const token = getToken();
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : { ...extra };
+};
+
+// Pass as socket.io-client options: io(url, socketOptions()).
+// `auth` as a callback re-reads the token on every reconnect.
+export const socketOptions = (extra = {}) => ({
+  ...extra,
+  auth: (cb) => cb({ token: getToken() }),
+});

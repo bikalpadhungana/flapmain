@@ -7,7 +7,7 @@ import {
   CloudRain
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, authHeaders, socketOptions } from '../config';
 import { io } from 'socket.io-client';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
@@ -159,7 +159,7 @@ const WeatherMonitor = () => {
       url += `&origin_node=${selectedStation}`;
     }
 
-    fetch(url)
+    fetch(url, { headers: authHeaders() })
       .then(res => {
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
         return res.json();
@@ -447,7 +447,7 @@ const WeatherMonitor = () => {
   useEffect(() => {
     let socket;
     if (isPolling) {
-      socket = io(API_BASE_URL.replace(/\/api$/, ''));
+      socket = io(API_BASE_URL.replace(/\/api$/, ''), socketOptions());
 
       socket.on('connect', () => {
         console.log('[WeatherMonitor] Connected to live weather telemetry stream');

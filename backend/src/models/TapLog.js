@@ -11,9 +11,12 @@ const TapLogSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // Raw device key, kept only when an edge node must pass it through to the
+    // legacy VPS. Never returned by queries unless explicitly selected.
     api_key: {
       type: String,
       default: '',
+      select: false,
     },
     tag_type: {
       type: String,
@@ -55,5 +58,7 @@ const TapLogSchema = new mongoose.Schema(
 );
 
 TapLogSchema.index({ timestamp: -1 });
+// Store-and-forward worker scans for unsynced taps every 10s
+TapLogSchema.index({ forwardedMain: 1, timestamp: 1 });
 
 module.exports = mongoose.model('TapLog', TapLogSchema);

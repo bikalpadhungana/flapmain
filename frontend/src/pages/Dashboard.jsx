@@ -4,7 +4,7 @@ import {
   Search, Trash2, Cpu, RefreshCw, Link2,
   CreditCard, Activity, Wifi, ArrowRight
 } from 'lucide-react';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, socketOptions } from '../config';
 import ConfirmModal from '../components/ConfirmModal';
 import io from 'socket.io-client';
 
@@ -111,7 +111,7 @@ function Dashboard() {
     const host = import.meta.env.DEV
       ? `http://${window.location.hostname}:5051`
       : window.location.origin;
-    socketRef.current = io(host, { transports: ['websocket', 'polling'] });
+    socketRef.current = io(host, socketOptions({ transports: ['websocket', 'polling'] }));
     socketRef.current.on('connect', () => setIsConnected(true));
     socketRef.current.on('disconnect', () => setIsConnected(false));
     socketRef.current.on('new_tap', (data) => {

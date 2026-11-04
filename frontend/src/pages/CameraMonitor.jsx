@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Camera, Video, Flashlight, RefreshCw, Radio, Maximize2, Download, Plus, CheckCircle, AlertCircle, Wifi, Monitor, Play, Pause, Upload, FileVideo, HardDrive } from 'lucide-react';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, authHeaders, socketOptions } from '../config';
 import { io } from 'socket.io-client';
 
 const CameraMonitor = () => {
@@ -75,7 +75,7 @@ const CameraMonitor = () => {
       .catch(err => console.warn('Could not fetch registered cameras:', err.message));
 
     // Connect to Socket.io for live camera status & direct frame uploads
-    const socket = io(API_BASE_URL.replace(/\/api$/, ''));
+    const socket = io(API_BASE_URL.replace(/\/api$/, ''), socketOptions());
 
     socket.on('new_camera_frame', (frameData) => {
       const { device_id, image_base64 } = frameData;
@@ -179,7 +179,7 @@ const CameraMonitor = () => {
         reader.onload = function (event) {
           fetch(`${API_BASE_URL}/v1/devices/camera/upload`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
               device_id: 'flap-esp32-cam-001',
               image_base64: event.target.result
