@@ -1311,6 +1311,8 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
     res.status(200).json({
       status: finalResponse.status || 'success',
       message: finalResponse.message || (mainForwarded ? 'Tap event saved on local system & forwarded' : 'Tap event saved locally and queued for offline sync'),
+      // Cardholder info as returned by flap.esainnovation.com, for the reader to print.
+      user: cardUserForReader(finalResponse.holder || finalResponse.data || finalResponse.user),
       display: finalResponse.display || {
         line1: 'Flap System',
         line2: uidStr.substring(0, 21),
@@ -1318,6 +1320,22 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
       },
     });
   });
+
+  // Flatten the VPS cardholder object into a small, safe set of printable fields
+  // (primitives only, secrets dropped, bounded size for the ESP8266's JSON buffer).
+  function cardUserForReader(holder) {
+    if (!holder || typeof holder !== 'object') return null;
+    const out = {};
+    let count = 0;
+    for (const [key, value] of Object.entries(holder)) {
+      if (count >= 15) break;
+      if (/key|token|password|secret|hash|^_|^__v$/i.test(key)) continue;
+      if (value === null || value === undefined || typeof value === 'object') continue;
+      out[key] = typeof value === 'string' ? value.slice(0, 64) : value;
+      count++;
+    }
+    return count ? out : null;
+  }
 
   // @route   GET /tap/logs
   // @desc    Get all tap records saved locally on this local system
