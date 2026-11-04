@@ -19,6 +19,7 @@ const {
 const { deviceAuthMode } = require('../config/security');
 const { evaluateAlertRules } = require('../services/alertEngine');
 const { checkOutboundUrl, postJson } = require('../services/outboundUrl');
+const { lookupCardHolder } = require('../services/flapCardLookup');
 
 const router = express.Router();
 
@@ -1146,6 +1147,10 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
     }
 
 
+    // Cardholder lookup via the Flap Card API runs in parallel with forwarding,
+    // so the reader's HTTP timeout is not the sum of both.
+    const lookupPromise = lookupCardHolder(uidStr);
+
     // Target 1: Local Device API (only used in edge/local mode)
     const localTargetUrl = process.env.TAP_DEVICE_TARGET_URL || '';
     // Target 2: Main Flap Company Backend Server (VPS)
@@ -1221,7 +1226,15 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
       }
     }
 
+    const lookup = await lookupPromise;
+    console.log(`[CARD LOOKUP] ${uidStr}: ${lookup.status}${lookup.holder ? ` (${lookup.holder.name || lookup.holder.flapid})` : ''} - ${lookup.message}`);
+
     // 4. UPDATE SAVED LOCAL TAP RECORD WITH FORWARDING STATUS
+    if (savedRecord) {
+      savedRecord.holder = lookup.holder;
+      savedRecord.lookupStatus = lookup.status;
+      savedRecord.lookupMessage = lookup.message;
+    }
     try {
       if (savedRecord && savedRecord._id && typeof savedRecord.save === 'function') {
         savedRecord.forwardedLocal = localForwarded;
@@ -1245,7 +1258,10 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
     // Prioritize VPS response (mainResponse) over localResponse for the final display
     const finalResponse = mainResponse || localResponse || {};
 
-    const userName = (finalResponse.holder && (finalResponse.holder.name || finalResponse.holder.username || finalResponse.holder.primaryFlapid)) ||
+    const lookupHolder = lookup.holder;
+    let scalePromptShown = false;
+    const userName = (lookupHolder && (lookupHolder.name || lookupHolder.flapid)) ||
+                     (finalResponse.holder && (finalResponse.holder.name || finalResponse.holder.username || finalResponse.holder.primaryFlapid)) ||
                      (finalResponse.data && (finalResponse.data.name || finalResponse.data.username || finalResponse.data.flapid)) ||
                      (finalResponse.user && finalResponse.user.name) ||
                      'Card User';
@@ -1253,8 +1269,8 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
     // Store active tap session for height & weight scale session correlation
     activeTapSession = {
       uid: uidStr,
-      flapid: req.body.flapid || finalResponse.flapid || (finalResponse.holder && finalResponse.holder.primaryFlapid) || (finalResponse.data && finalResponse.data.flapid) || 'FLAP-CARD-USER',
-      userInfo: finalResponse.holder || finalResponse.data || finalResponse.user || { name: userName },
+      flapid: req.body.flapid || (lookupHolder && lookupHolder.flapid) || finalResponse.flapid || (finalResponse.holder && finalResponse.holder.primaryFlapid) || (finalResponse.data && finalResponse.data.flapid) || 'FLAP-CARD-USER',
+      userInfo: lookupHolder || finalResponse.holder || finalResponse.data || finalResponse.user || { name: userName },
       timestamp: Date.now()
     };
 
@@ -1284,6 +1300,7 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
             line2: 'Step on scale!',
             line3: 'Awaiting weight...',
           };
+          scalePromptShown = true;
           console.log(`[SENSOR FUSION WORKSTATION]: Card tap on ${req.body.device_id} matched Fusion Group '${fusionGroup.name}' paired with scale '${pairedScale.device_id}'. OLED prompt: Step on scale!`);
         }
 
@@ -1308,11 +1325,17 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
 
     console.log('[ACTIVE TAP SESSION RECORDED FOR SCALE CORRELATION]:', activeTapSession);
 
+    const readerResult = readerResultFromLookup(lookup, uidStr, mainForwarded);
+    // A scale prompt wins for normal cards; lost/defective cards always show their warning.
+    if (readerResult && (!scalePromptShown || ['lost', 'defective'].includes(readerResult.status))) {
+      finalResponse.display = readerResult.display;
+    }
+
     res.status(200).json({
-      status: finalResponse.status || 'success',
+      status: (readerResult && readerResult.status) || finalResponse.status || 'success',
       message: finalResponse.message || (mainForwarded ? 'Tap event saved on local system & forwarded' : 'Tap event saved locally and queued for offline sync'),
       // Cardholder info as returned by flap.esainnovation.com, for the reader to print.
-      user: cardUserForReader(finalResponse.holder || finalResponse.data || finalResponse.user),
+      user: cardUserForReader(lookupHolder || finalResponse.holder || finalResponse.data || finalResponse.user),
       display: finalResponse.display || {
         line1: 'Flap System',
         line2: uidStr.substring(0, 21),
@@ -1320,6 +1343,29 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
       },
     });
   });
+
+  // Map a Flap Card API lookup to the reader's status + 3 OLED lines (21 chars each).
+  // Status values match flap_cardreader.ino showResult(): success | lost | defective | unknown.
+  // 'unverified' returns null so the legacy VPS response is used instead.
+  function readerResultFromLookup(lookup, uid, forwarded) {
+    const cut = (v) => String(v || '').slice(0, 21);
+    const h = lookup.holder || {};
+    switch (lookup.status) {
+      case 'ok':
+        return { status: 'success', display: { line1: cut(h.name || h.flapid), line2: cut(h.flapid), line3: forwarded ? 'Check-in saved' : 'Saved offline' } };
+      case 'lost':
+        return { status: 'lost', display: { line1: cut(h.name || uid), line2: 'Reported lost', line3: 'Contact the owner' } };
+      case 'defective':
+        return { status: 'defective', display: { line1: 'Defective card', line2: cut(uid), line3: 'Contact Flap' } };
+      case 'unknown':
+        return {
+          status: 'unknown',
+          display: { line1: cut(uid), line2: /not linked/i.test(lookup.message) ? 'Not activated yet' : 'Not registered', line3: 'Activate in Flap app' },
+        };
+      default:
+        return null;
+    }
+  }
 
   // Flatten the VPS cardholder object into a small, safe set of printable fields
   // (primitives only, secrets dropped, bounded size for the ESP8266's JSON buffer).

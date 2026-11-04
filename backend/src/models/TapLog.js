@@ -51,6 +51,20 @@ const TapLogSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: null,
     },
+    // Cardholder public profile from the Flap Card API (check-uid lookup)
+    holder: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    // ok | lost | defective | unknown | unverified
+    lookupStatus: {
+      type: String,
+      default: '',
+    },
+    lookupMessage: {
+      type: String,
+      default: '',
+    },
   },
   {
     timestamps: true,
