@@ -193,6 +193,36 @@ String getHTML() {
 // NOTE: We use pure polling (LoRa.parsePacket in loop()) for reliable reception.
 // No ISR callback registered — avoids ISR/heap conflicts on ESP8266.
 
+// Message IDs for packets the gateway itself sends (downlink messages, ACKs).
+// Starts random so radios don't drop them as duplicates after a gateway reboot.
+uint16_t baseMsgCounter = 0;
+uint16_t nextBaseMsgId() {
+  if (baseMsgCounter == 0) baseMsgCounter = (uint16_t)(ESP.random() % 60000) + 1;
+  if (++baseMsgCounter == 0) baseMsgCounter = 1;
+  return baseMsgCounter;
+}
+
+// Confirm a walkie broadcast so the sender sees "Reached BASE".
+void sendBaseAck(uint8_t toNode, uint16_t ackedMsgId) {
+  LoRaMeshPacket ack;
+  memset(&ack, 0, sizeof(ack));
+  uint16_t id = nextBaseMsgId();
+  ack.msgIdHi = id >> 8;
+  ack.msgIdLo = id & 0xFF;
+  ack.originNode = 0; // BASE
+  ack.targetNode = toNode;
+  ack.ttl = DEFAULT_MAX_TTL;
+  ack.packetType = PKT_TYPE_ACK;
+  snprintf(ack.text_msg, sizeof(ack.text_msg), "ACK %u", ackedMsgId);
+  dedupCache.markSeen(0, id);
+  delay(random(100, 300)); // let walkie relays of the original finish first
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&ack, sizeof(ack));
+  LoRa.endPacket();
+  LoRa.receive();
+  Serial.printf("[ACK] Confirmed broadcast MsgID #%u to Node #%u\n", ackedMsgId, toNode);
+}
+
 // ---- Process Received LoRa Packet ----
 void processMeshPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
   uint16_t msgId = ((uint16_t)pkt.msgIdHi << 8) | pkt.msgIdLo;
@@ -213,7 +243,7 @@ void processMeshPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
     Serial.printf(" - Packet Msg ID   : #%u\n", msgId);
     Serial.printf(" - Origin Node ID  : #%u\n", pkt.originNode);
     Serial.printf(" - Target Node ID  : #%u (%s)\n", pkt.targetNode, pkt.targetNode == 0 ? "BROADCAST" : "DIRECT");
-    Serial.printf(" - Packet Type     : %s (%d)\n", pkt.packetType == PKT_TYPE_SOS ? "EMERGENCY SOS" : (pkt.packetType == PKT_TYPE_TEXT ? "WALKIE TEXT" : "WEATHER TELEMETRY"), pkt.packetType);
+    Serial.printf(" - Packet Type     : %s (%d)\n", pkt.packetType == PKT_TYPE_SOS ? "EMERGENCY SOS" : (pkt.packetType == PKT_TYPE_TEXT ? "WALKIE TEXT" : (pkt.packetType == PKT_TYPE_ACK ? "ACK" : (pkt.packetType == PKT_TYPE_HEARTBEAT ? "HEARTBEAT" : "WEATHER TELEMETRY"))), pkt.packetType);
     Serial.printf(" - Expected Size   : %d bytes | Struct Size: %d bytes\n", (int)sizeof(LoRaMeshPacket), (int)sizeof(LoRaMeshPacket));
     Serial.printf(" - TTL (Hops Left) : %d\n", pkt.ttl);
     if (pkt.text_msg[0] != '\0') {
@@ -246,6 +276,12 @@ void processMeshPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
     digitalWrite(STATUS_LED, LOW);
     delay(50);
     digitalWrite(STATUS_LED, HIGH);
+
+    // Walkie broadcasts (text / SOS) are confirmed so the sender knows BASE heard them.
+    if ((pkt.packetType == PKT_TYPE_TEXT || pkt.packetType == PKT_TYPE_SOS) &&
+        pkt.targetNode == 0 && pkt.originNode != 0 && pkt.text_msg[0] != '\0') {
+      sendBaseAck(pkt.originNode, msgId);
+    }
 
     // Forward Telemetry & Text/SOS Messages to FlapMain Cloud API Endpoint if connected
     if (WiFi.status() == WL_CONNECTED) {
@@ -510,6 +546,13 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
 
 // ---- GATEWAY MESSAGE BRIDGE — TWO-WAY LORA MESH & FLAPMAIN APP ----
 void handleUplinkPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
+  // ACKs are radio-level confirmations, not sensor data: never forward them as telemetry.
+  if (pkt.packetType == PKT_TYPE_ACK) {
+    if (pkt.targetNode == 0) {
+      Serial.printf("[ACK] Node #%u confirmed BASE message (%s)\n", pkt.originNode, pkt.text_msg);
+    }
+    return;
+  }
   if (pkt.packetType == PKT_TYPE_TEXT || pkt.packetType == PKT_TYPE_SOS) {
     forwardMessageToCloudApi(pkt, rssi, snr);
   }
@@ -659,8 +702,8 @@ void pollOutboxAndRelay() {
 
   LoRaMeshPacket pkt;
   memset(&pkt, 0, sizeof(pkt));
-  static uint16_t downlinkMsgCounter = 0;
-  uint16_t msgId = downlinkMsgCounter++;
+  uint16_t msgId = nextBaseMsgId();
+  dedupCache.markSeen(0, msgId);
 
   pkt.msgIdHi    = msgId >> 8;
   pkt.msgIdLo    = msgId & 0xFF;

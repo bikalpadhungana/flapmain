@@ -235,13 +235,17 @@ bool oledPresent = false;
 MeshDedup dedupCache;
 uint16_t msgCounter = 0;
 
-// Last Received Telemetry / Message Preview State
+// Every node must use the same 58-byte packet as the AWS and gateway.
+static_assert(sizeof(LoRaMeshPacket) == 58, "LoRaMeshPacket must be 58 bytes (update lora_mesh_protocol.h)");
+
+// Last received message (shown on the idle screen)
 uint8_t  lastRxNode = 0;
 int      lastRxRssi = 0;
 float    lastRxSnr = 0.0;
-char     lastRxMsg[28] = "";
+char     lastRxMsg[32] = "";
 uint8_t  lastRxPktType = PKT_TYPE_TEXT;
 uint8_t  lastRxAlertLevel = 0;
+bool     lastRxDirect = false;
 unsigned long lastRxTime = 0;
 
 // ---- Received Messages Inbox History (Compact RAM Buffer) ----
@@ -252,12 +256,36 @@ struct ReceivedMessage {
   uint8_t targetNode;
   int8_t  rssi;
   uint8_t alertLevel;
-  char    text[26];
+  unsigned long rxTime;
+  char    text[32];
 };
 
 ReceivedMessage messageInbox[INBOX_CAPACITY];
 uint8_t inboxCount = 0;
 int8_t  inboxBrowseIdx = 0; // 0 = newest, 1 = previous, etc.
+uint8_t unreadCount = 0;
+
+// ---- Delivery confirmation (ACK) ----
+// Direct messages wait for an ACK from the receiver and are re-sent if none
+// arrives. Broadcasts are not re-sent; a gateway (BASE) ACKs them when it hears them.
+#define ACK_TIMEOUT_MS  6000
+#define ACK_MAX_RETRIES 2
+
+enum SendStatus : uint8_t {
+  SEND_NONE = 0,
+  SEND_WAITING,      // direct message, waiting for the receiver's ACK
+  SEND_DELIVERED,    // receiver confirmed
+  SEND_FAILED,       // no ACK after all retries
+  SEND_BROADCAST,    // broadcast sent (no ACK expected from walkies)
+  SEND_REACHED_BASE  // a gateway confirmed the broadcast
+};
+
+LoRaMeshPacket pendingPkt;          // copy of the direct message being confirmed
+uint8_t  pendingRetries = 0;
+unsigned long pendingSentAt = 0;
+uint8_t  lastSendStatus = SEND_NONE;
+uint8_t  lastSendTarget = 0;
+uint16_t lastSendMsgId = 0;
 
 // ---- Preset Short SMS Messages Stored in Flash (PROGMEM) ----
 const char preset_0[] PROGMEM = "HELP NEEDED!";
@@ -342,6 +370,16 @@ void soundAlarm() {
   #endif
 }
 
+void triggerSplash(const __FlashStringHelper* l1, const char* l2) {
+  strncpy_P(splashLine1, (PGM_P)l1, sizeof(splashLine1) - 1);
+  splashLine1[sizeof(splashLine1) - 1] = '\0';
+  strncpy(splashLine2, l2, sizeof(splashLine2) - 1);
+  splashLine2[sizeof(splashLine2) - 1] = '\0';
+  splashStartTime = millis();
+  uiState = UI_STATE_SPLASH;
+  updateOledDisplay();
+}
+
 void triggerSplash(const char* l1, const char* l2) {
   strncpy(splashLine1, l1, sizeof(splashLine1) - 1);
   splashLine1[sizeof(splashLine1) - 1] = '\0';
@@ -400,10 +438,63 @@ void saveToInbox(const LoRaMeshPacket &pkt, int rssi) {
   }
   messageInbox[0].senderNode = pkt.originNode;
   messageInbox[0].targetNode = pkt.targetNode;
-  messageInbox[0].rssi = (int8_t)rssi;
+  messageInbox[0].rssi = (int8_t)constrain(rssi, -128, 127);
   messageInbox[0].alertLevel = pkt.alert_level;
+  messageInbox[0].rxTime = millis();
   strncpy(messageInbox[0].text, pkt.text_msg, sizeof(messageInbox[0].text) - 1);
   messageInbox[0].text[sizeof(messageInbox[0].text) - 1] = '\0';
+  if (unreadCount < 9) unreadCount++;
+}
+
+// Short display name for a node number (0 = gateway / dashboard).
+void nodeName(uint8_t id, char* buf, size_t n) {
+  switch (id) {
+    case 0:   strncpy_P(buf, PSTR("BASE"), n); break;
+    case 101: strncpy_P(buf, PSTR("Alpha"), n); break;
+    case 102: strncpy_P(buf, PSTR("Bravo"), n); break;
+    case 103: strncpy_P(buf, PSTR("Charlie"), n); break;
+    default:  snprintf_P(buf, n, PSTR("#%u"), id); break;
+  }
+  buf[n - 1] = '\0';
+}
+
+// Age of a millis() timestamp as "12s" / "5m" / "2h".
+void formatAge(unsigned long t, char* buf, size_t n) {
+  unsigned long sec = (millis() - t) / 1000UL;
+  if (sec < 60) snprintf_P(buf, n, PSTR("%lus"), sec);
+  else if (sec < 3600) snprintf_P(buf, n, PSTR("%lum"), sec / 60);
+  else snprintf_P(buf, n, PSTR("%luh"), sec / 3600);
+}
+
+// Print text word-wrapped over up to maxLines OLED rows (21 characters each).
+void printWrapped(uint8_t page, uint8_t maxLines, const char* text, bool invert = false) {
+  const uint8_t W = 21;
+  const char* p = text;
+  for (uint8_t line = 0; line < maxLines; line++) {
+    while (*p == ' ') p++;
+    display.setCursor(page + line, 0);
+    size_t take = strlen(p);
+    if (take > W) {
+      take = W;
+      if (line < maxLines - 1) {
+        for (int8_t i = W; i > 0; i--) {
+          if (p[i] == ' ') { take = i; break; }
+        }
+      }
+    }
+    for (size_t i = 0; i < take; i++) display.writeChar(p[i], invert);
+    display.clearToEol(invert);
+    p += take;
+  }
+}
+
+// One-line "Bravo>me 12s -82dB" / "BASE>all 3m -95dB" summary (max 21 chars).
+void printMessageMeta(uint8_t page, uint8_t sender, uint8_t target, int rssi, unsigned long rxTime, bool invert) {
+  char name[9], age[6], line[24];
+  nodeName(sender, name, sizeof(name));
+  formatAge(rxTime, age, sizeof(age));
+  snprintf_P(line, sizeof(line), PSTR("%s>%s %s %ddB"), name, target == 0 ? "all" : "me", age, rssi);
+  display.printLine(page, line, invert);
 }
 
 void drawHeader(const __FlashStringHelper* title) {
@@ -446,51 +537,44 @@ void updateOledDisplay() {
     // ── 1. IDLE / STANDBY DASHBOARD ──────────────────────────────────────────
     case UI_STATE_IDLE: {
       char headerBuf[16];
-      snprintf(headerBuf, sizeof(headerBuf), "WALKIE #%d", currentWalkieNodeId);
+      if (unreadCount > 0) snprintf_P(headerBuf, sizeof(headerBuf), PSTR("#%d  %u NEW"), currentWalkieNodeId, unreadCount);
+      else snprintf_P(headerBuf, sizeof(headerBuf), PSTR("WALKIE #%d"), currentWalkieNodeId);
       drawHeader(headerBuf);
 
-      if (lastRxAlertLevel > 0 && (millis() - lastRxTime < 30000)) {
-        display.printLine(1, F("! EMERGENCY SOS !"), true);
-        display.setCursor(2, 0);
-        display.print(F("From Node #"));
-        display.printInt(lastRxNode);
-        display.clearToEol();
-        display.printLine(3, lastRxMsg[0] ? lastRxMsg : "SOS TRIGGERED!");
-        display.setCursor(4, 0);
-        display.print(F("RSSI:"));
-        display.printInt(lastRxRssi);
-        display.print(F("dBm"));
-        display.clearToEol();
-      } else if (lastRxNode > 0 && (millis() - lastRxTime < 45000)) {
-        display.setCursor(2, 0);
-        display.print(F("RX From #"));
-        display.printInt(lastRxNode);
-        if (inboxCount > 0) display.print(F(" (New)"));
-        display.clearToEol();
+      bool showSos = lastRxAlertLevel > 0 && (millis() - lastRxTime < 30000);
+      bool showMsg = lastRxTime > 0 && (millis() - lastRxTime < 60000); // includes messages from BASE (node 0)
 
-        display.setCursor(3, 0);
-        display.print(F("\""));
-        display.print(lastRxMsg);
-        display.print(F("\""));
-        display.clearToEol();
-
-        display.setCursor(4, 0);
-        display.print(F("Sig:"));
-        display.printInt(lastRxRssi);
-        display.print(F("dBm "));
-        display.printFloat(lastRxSnr, 1);
-        display.print(F("dB"));
-        display.clearToEol();
+      if (showSos || showMsg) {
+        // Latest message: sender line, then the text word-wrapped over 3 rows
+        printMessageMeta(2, lastRxNode, lastRxDirect ? currentWalkieNodeId : 0, lastRxRssi, lastRxTime, showSos);
+        printWrapped(3, 3, lastRxMsg[0] ? lastRxMsg : "SOS TRIGGERED!");
       } else {
-        display.printLine(2, F("LoRa Mesh 433MHz"));
-        display.printLine(3, F("Status: LISTENING"));
-        display.setCursor(4, 0);
-        display.print(F("Target: "));
-        char tBuf[20];
+        char tBuf[22], line[24];
+        display.printLine(2, F("Listening 433MHz"));
         strcpy_P(tBuf, (char*)pgm_read_word(&(TARGET_NAMES[currentTargetIdx])));
-        display.print(tBuf);
-        display.clearToEol();
-        display.printLine(5, F("Hold [CLK]=SOS"));
+        snprintf_P(line, sizeof(line), PSTR("To %s"), tBuf);
+        display.printLine(3, line);
+
+        char name[9];
+        nodeName(lastSendTarget, name, sizeof(name));
+        switch (lastSendStatus) {
+          case SEND_WAITING:
+            snprintf_P(line, sizeof(line), PSTR("Sending.. try %u/%u"), pendingRetries + 1, ACK_MAX_RETRIES + 1);
+            break;
+          case SEND_DELIVERED:    snprintf_P(line, sizeof(line), PSTR("Last: Delivered %s"), name); break;
+          case SEND_FAILED:       snprintf_P(line, sizeof(line), PSTR("Last: NOT delivered")); break;
+          case SEND_BROADCAST:    snprintf_P(line, sizeof(line), PSTR("Last: Sent to all")); break;
+          case SEND_REACHED_BASE: snprintf_P(line, sizeof(line), PSTR("Last: Reached BASE")); break;
+          default:                line[0] = '\0'; break;
+        }
+        display.printLine(4, line, lastSendStatus == SEND_FAILED);
+
+        if (unreadCount > 0) {
+          snprintf_P(line, sizeof(line), PSTR("Inbox: %u unread"), unreadCount);
+          display.printLine(5, line);
+        } else {
+          display.printLine(5, F("Hold [C] = SOS"));
+        }
       }
 
       drawFooter(F("Menu"), F("QuickSMS"));
@@ -552,41 +636,22 @@ void updateOledDisplay() {
 
     // ── 4. RECEIVED MESSAGE INBOX HISTORY BROWSER ────────────────────────────
     case UI_STATE_INBOX: {
-      drawHeader(F("INBOX HISTORY"));
-
       if (inboxCount == 0) {
+        drawHeader(F("INBOX"));
         display.printLine(2, F("Inbox Empty"));
         display.printLine(3, F("No messages received"));
         display.printLine(4, F("Listening on 433MHz"));
         drawFooter(F("---"), F("Back"));
       } else {
         ReceivedMessage* m = &messageInbox[inboxBrowseIdx];
+        char title[16];
+        snprintf_P(title, sizeof(title), PSTR("INBOX %d/%d"), inboxBrowseIdx + 1, inboxCount);
+        drawHeader(title);
 
-        display.setCursor(2, 0);
-        display.print(F("#"));
-        display.printInt(inboxBrowseIdx + 1);
-        display.print(F("/"));
-        display.printInt(inboxCount);
-        display.print(F(" From:#"));
-        display.printInt(m->senderNode);
-        display.print(m->targetNode == 0 ? F(" (All)") : F(" (Dir)"));
-        display.clearToEol();
+        printMessageMeta(2, m->senderNode, m->targetNode, m->rssi, m->rxTime, m->alertLevel > 0);
+        printWrapped(3, 3, m->text);
 
-        display.setCursor(3, 0);
-        if (m->alertLevel > 0) display.print(F("!SOS! "));
-        display.print(F("\""));
-        display.print(m->text);
-        display.print(F("\""));
-        display.clearToEol();
-
-        display.setCursor(4, 0);
-        display.print(F("Sig:"));
-        display.printInt(m->rssi);
-        display.print(F("dBm "));
-        display.print(m->alertLevel > 0 ? F("ALERT:SOS") : F("TYPE:TXT"));
-        display.clearToEol();
-
-        drawFooter(F("NextMsg"), F("Back"));
+        drawFooter(F("Next"), F("Back"));
       }
       break;
     }
@@ -633,22 +698,38 @@ void updateOledDisplay() {
   }
 }
 
+// ---- Transmit a packet and return to receive mode ----
+bool transmitPacket(const LoRaMeshPacket &pkt) {
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  LoRa.beginPacket();
+  LoRa.write((const uint8_t*)&pkt, sizeof(pkt));
+  int res = LoRa.endPacket();
+  digitalWrite(STATUS_LED_PIN, LOW);
+  LoRa.receive();
+  return res == 1;
+}
+
+uint16_t nextMsgId() {
+  msgCounter++;
+  if (msgCounter == 0) msgCounter = 1;
+  return msgCounter;
+}
+
 // ---- Transmit Walkie LoRa Message ----
 void sendWalkieMessage(const char* text, uint8_t alertLevel, uint8_t pktType, uint8_t targetNode) {
-  msgCounter++;
-
   LoRaMeshPacket pkt;
   memset(&pkt, 0, sizeof(pkt));
 
-  char cleanText[28];
+  char cleanText[32];
   memset(cleanText, 0, sizeof(cleanText));
   uint8_t parsedTarget = parseTargetNodeFromText(text, cleanText, sizeof(cleanText));
   if (targetNode == 0) {
     targetNode = parsedTarget;
   }
 
-  pkt.msgIdHi = (uint8_t)(msgCounter >> 8);
-  pkt.msgIdLo = (uint8_t)(msgCounter & 0xFF);
+  uint16_t msgId = nextMsgId();
+  pkt.msgIdHi = (uint8_t)(msgId >> 8);
+  pkt.msgIdLo = (uint8_t)(msgId & 0xFF);
   pkt.originNode = currentWalkieNodeId;
   pkt.targetNode = targetNode;
   pkt.ttl = DEFAULT_MAX_TTL;
@@ -659,23 +740,29 @@ void sendWalkieMessage(const char* text, uint8_t alertLevel, uint8_t pktType, ui
   strncpy(pkt.text_msg, (cleanText[0] != '\0' ? cleanText : text), sizeof(pkt.text_msg) - 1);
   pkt.text_msg[sizeof(pkt.text_msg) - 1] = '\0';
 
-  uint16_t msgId = ((uint16_t)pkt.msgIdHi << 8) | pkt.msgIdLo;
   dedupCache.markSeen(currentWalkieNodeId, msgId);
+  bool ok = transmitPacket(pkt);
 
-  digitalWrite(STATUS_LED_PIN, HIGH);
-  LoRa.beginPacket();
-  LoRa.write((uint8_t*)&pkt, sizeof(pkt));
-  int res = LoRa.endPacket();
-  digitalWrite(STATUS_LED_PIN, LOW);
-
-  LoRa.receive();
+  // Track delivery for text and SOS messages.
+  if (pktType == PKT_TYPE_TEXT || pktType == PKT_TYPE_SOS) {
+    lastSendTarget = targetNode;
+    lastSendMsgId = msgId;
+    if (targetNode != 0) {
+      pendingPkt = pkt;
+      pendingRetries = 0;
+      pendingSentAt = millis();
+      lastSendStatus = SEND_WAITING;
+    } else {
+      lastSendStatus = SEND_BROADCAST;
+    }
+  }
 
   Serial.println(F("\n=============================================="));
-  if (res == 1) {
+  if (ok) {
     Serial.print(F("🚀 [WALKIE TX SUCCESS] Sent MsgID=#")); Serial.println(msgId);
     Serial.print(F(" - Origin Node: #")); Serial.println(currentWalkieNodeId);
     Serial.print(F(" - Target Node: #")); Serial.print(targetNode);
-    Serial.println(targetNode == 0 ? F(" (BROADCAST ALL)") : F(" (DIRECT)"));
+    Serial.println(targetNode == 0 ? F(" (BROADCAST ALL)") : F(" (DIRECT, waiting for ACK)"));
     Serial.print(F(" - Message    : \"")); Serial.print(pkt.text_msg); Serial.println(F("\""));
   } else {
     Serial.println(F("❌ [WALKIE TX FAIL] LoRa radio transmit error!"));
@@ -683,11 +770,58 @@ void sendWalkieMessage(const char* text, uint8_t alertLevel, uint8_t pktType, ui
   Serial.println(F("=============================================="));
 }
 
+// ---- Confirm a received message back to its sender ----
+void sendAck(uint8_t toNode, uint16_t ackedMsgId) {
+  LoRaMeshPacket ack;
+  memset(&ack, 0, sizeof(ack));
+  uint16_t msgId = nextMsgId();
+  ack.msgIdHi = (uint8_t)(msgId >> 8);
+  ack.msgIdLo = (uint8_t)(msgId & 0xFF);
+  ack.originNode = currentWalkieNodeId;
+  ack.targetNode = toNode;
+  ack.ttl = DEFAULT_MAX_TTL;
+  ack.packetType = PKT_TYPE_ACK;
+  ack.battery_mv = readBatteryMv();
+  snprintf_P(ack.text_msg, sizeof(ack.text_msg), PSTR("ACK %u"), ackedMsgId);
+
+  dedupCache.markSeen(currentWalkieNodeId, msgId);
+  delay(random(80, 250)); // let relays of the original packet finish first
+  transmitPacket(ack);
+
+  Serial.print(F("✅ [ACK SENT] Confirmed MsgID=#")); Serial.print(ackedMsgId);
+  Serial.print(F(" to Node #")); Serial.println(toNode);
+}
+
+// ---- Re-send an unconfirmed direct message, or give up ----
+void checkPendingAck() {
+  if (lastSendStatus != SEND_WAITING) return;
+  if (millis() - pendingSentAt < ACK_TIMEOUT_MS) return;
+
+  char name[9], line[20];
+  nodeName(pendingPkt.targetNode, name, sizeof(name));
+
+  if (pendingRetries < ACK_MAX_RETRIES) {
+    pendingRetries++;
+    pendingSentAt = millis();
+    pendingPkt.ttl = DEFAULT_MAX_TTL;
+    transmitPacket(pendingPkt); // same message ID: receivers drop the copy but ACK again
+    Serial.print(F("🔁 [RETRY] No ACK yet, re-sent MsgID=#")); Serial.print(lastSendMsgId);
+    Serial.print(F(" (try ")); Serial.print(pendingRetries + 1); Serial.println(F(")"));
+    if (uiState == UI_STATE_IDLE) updateOledDisplay();
+  } else {
+    lastSendStatus = SEND_FAILED;
+    Serial.print(F("❌ [NOT DELIVERED] No ACK from Node #")); Serial.println(pendingPkt.targetNode);
+    playToneBeep(600, 250);
+    snprintf_P(line, sizeof(line), PSTR("No reply from %s"), name);
+    triggerSplash(F("NOT DELIVERED"), line);
+  }
+}
+
 // ---- Instant Emergency SOS Trigger ----
 void triggerInstantSos() {
   soundAlarm();
   char sosMsg[28];
-  snprintf(sosMsg, sizeof(sosMsg), "SOS FROM NODE #%d!", currentWalkieNodeId);
+  snprintf_P(sosMsg, sizeof(sosMsg), PSTR("SOS FROM NODE #%d!"), currentWalkieNodeId);
   sendWalkieMessage(sosMsg, 2, PKT_TYPE_SOS, 0);
   triggerSplash("! EMERGENCY SOS !", "BROADCAST TO MESH");
 }
@@ -763,6 +897,7 @@ void handleClickButton() {
         case 1:
           uiState = UI_STATE_INBOX;
           inboxBrowseIdx = 0;
+          unreadCount = 0;
           break;
         case 2:
           uiState = UI_STATE_SOS_CONFIRM;
@@ -787,9 +922,14 @@ void handleClickButton() {
         uint8_t target = TARGET_NODE_IDS[currentTargetIdx];
         sendWalkieMessage(sendBuf, 0, PKT_TYPE_TEXT, target);
 
-        char destBuf[20];
-        snprintf(destBuf, sizeof(destBuf), "Sent to #%d", target);
-        triggerSplash("SMS BROADCASTED!", destBuf);
+        char name[9], destBuf[20];
+        nodeName(target, name, sizeof(name));
+        if (target == 0) {
+          triggerSplash(F("SENT TO ALL"), "No reply expected");
+        } else {
+          snprintf_P(destBuf, sizeof(destBuf), PSTR("to %s, wait ACK"), name);
+          triggerSplash(F("SENDING..."), destBuf);
+        }
         digitalWrite(STATUS_LED_PIN, LOW);
         return;
       }
@@ -803,7 +943,7 @@ void handleClickButton() {
     case UI_STATE_TARGET:
       currentTargetIdx = targetSelectIdx;
       char setBuf[20];
-      snprintf(setBuf, sizeof(setBuf), "Node #%d Active", TARGET_NODE_IDS[currentTargetIdx]);
+      snprintf_P(setBuf, sizeof(setBuf), PSTR("Node #%d Active"), TARGET_NODE_IDS[currentTargetIdx]);
       triggerSplash("TARGET UPDATED!", setBuf);
       digitalWrite(STATUS_LED_PIN, LOW);
       return;
@@ -902,67 +1042,78 @@ void processIncomingPacket(int packetSize) {
   int rssi = LoRa.packetRssi();
   float snr = LoRa.packetSnr();
 
-  Serial.println(F("\n=============================================="));
-  Serial.print(F("📡 [LORA RF RX] Received packet: "));
-  Serial.print(packetSize);
-  Serial.print(F(" bytes | RSSI="));
-  Serial.print(rssi);
-  Serial.print(F(" dBm | SNR="));
-  Serial.print(snr, 1);
-  Serial.println(F(" dB"));
-
-  if (packetSize < 50 || packetSize > (int)sizeof(LoRaMeshPacket) + 10) {
-    Serial.println(F("⚠️ [RX REJECT] Invalid packet size! Outside 50..66 byte window."));
-    Serial.println(F("=============================================="));
+  if (packetSize != (int)sizeof(LoRaMeshPacket)) {
+    Serial.print(F("⚠️ [RX REJECT] ")); Serial.print(packetSize);
+    Serial.println(F(" bytes; expected 58. Sender has an old lora_mesh_protocol.h, re-flash it."));
+    while (LoRa.available()) LoRa.read();
     return;
   }
 
   LoRaMeshPacket pkt;
-  memset(&pkt, 0, sizeof(pkt));
-  size_t toRead = ((size_t)packetSize < sizeof(pkt)) ? (size_t)packetSize : sizeof(pkt);
-  LoRa.readBytes((uint8_t*)&pkt, toRead);
+  LoRa.readBytes((uint8_t*)&pkt, sizeof(pkt));
+  pkt.text_msg[sizeof(pkt.text_msg) - 1] = '\0'; // never trust the terminator from the air
 
   uint16_t msgId = ((uint16_t)pkt.msgIdHi << 8) | pkt.msgIdLo;
+  bool isMessage = (pkt.packetType == PKT_TYPE_TEXT || pkt.packetType == PKT_TYPE_SOS) && pkt.text_msg[0] != '\0';
+  bool toMe = (pkt.targetNode == currentWalkieNodeId);
 
-  Serial.print(F(" - Origin Node ID : #")); Serial.println(pkt.originNode);
-  Serial.print(F(" - Target Node ID : #")); Serial.print(pkt.targetNode);
-  Serial.println(pkt.targetNode == 0 ? F(" (BROADCAST ALL)") : F(" (DIRECT)"));
-  Serial.print(F(" - Packet Type    : ")); Serial.println(pkt.packetType);
-  Serial.print(F(" - MsgID / TTL     : #")); Serial.print(msgId); Serial.print(F(" / TTL=")); Serial.println(pkt.ttl);
-  Serial.print(F(" - Message Text   : \"")); Serial.print(pkt.text_msg); Serial.println(F("\""));
-
-  // Detect duplicate Node ID conflict
-  if (pkt.originNode == currentWalkieNodeId) {
-    Serial.println(F("⚠️ [WARNING: DUPLICATE NODE ID DETECTED!]"));
-    Serial.print(F("   The transmitter has the SAME Node ID (#"));
-    Serial.print(pkt.originNode);
-    Serial.println(F(") as this receiver!"));
-    Serial.println(F("   👉 Change this node's ID by typing '/id 102' in the Serial Monitor!"));
-  }
-
+  // Copies of packets already handled (mesh relays, or a sender retrying).
   if (dedupCache.alreadySeen(pkt.originNode, msgId)) {
-    Serial.println(F("⚠️ [RX DEDUP] Packet already seen & processed. Ignoring duplicate."));
-    Serial.println(F("=============================================="));
+    // The sender retries when our ACK was lost: confirm again.
+    if (isMessage && toMe && pkt.originNode != currentWalkieNodeId) sendAck(pkt.originNode, msgId);
     return;
   }
   dedupCache.markSeen(pkt.originNode, msgId);
 
-  bool isForMe = (pkt.targetNode == 0 || pkt.targetNode == currentWalkieNodeId);
+  if (pkt.originNode == currentWalkieNodeId) {
+    Serial.println(F("⚠️ [DUPLICATE NODE ID] Another radio uses this node ID! Type '/id 102' to change it."));
+    return;
+  }
 
-  if (isForMe) {
+  // ── Delivery confirmations ──────────────────────────────────────────────
+  if (pkt.packetType == PKT_TYPE_ACK) {
+    if (!toMe) {
+      // ACK for another node: only relay it.
+    } else {
+      uint16_t ackedId = (uint16_t)atol(pkt.text_msg + 4); // "ACK <id>"
+      char name[9];
+      nodeName(pkt.originNode, name, sizeof(name));
+      Serial.print(F("📬 [ACK RX] Node #")); Serial.print(pkt.originNode);
+      Serial.print(F(" confirmed MsgID=#")); Serial.println(ackedId);
+
+      if (lastSendStatus == SEND_WAITING && ackedId == lastSendMsgId && pkt.originNode == pendingPkt.targetNode) {
+        lastSendStatus = SEND_DELIVERED;
+        playToneBeep(2600, 40); delay(60); playToneBeep(3000, 60);
+        char line[20];
+        snprintf_P(line, sizeof(line), PSTR("Read by %s"), name);
+        triggerSplash(F("DELIVERED"), line);
+      } else if (pkt.originNode == 0 && ackedId == lastSendMsgId &&
+                 (lastSendStatus == SEND_BROADCAST || lastSendStatus == SEND_REACHED_BASE)) {
+        lastSendStatus = SEND_REACHED_BASE;
+        playToneBeep(2600, 40);
+        if (uiState == UI_STATE_IDLE) updateOledDisplay();
+      }
+      return; // addressed to us: do not relay
+    }
+  }
+
+  // ── Text / SOS messages ─────────────────────────────────────────────────
+  if (isMessage && (pkt.targetNode == 0 || toMe)) {
+    Serial.println(F("\n=============================================="));
+    Serial.print(F("📨 [MESSAGE] From #")); Serial.print(pkt.originNode);
+    Serial.print(toMe ? F(" to me") : F(" to all"));
+    Serial.print(F(" | RSSI=")); Serial.print(rssi); Serial.print(F(" SNR=")); Serial.println(snr, 1);
+    Serial.print(F("   \"")); Serial.print(pkt.text_msg); Serial.println(F("\""));
+    Serial.println(F("=============================================="));
+
     digitalWrite(STATUS_LED_PIN, HIGH);
     delay(30);
     digitalWrite(STATUS_LED_PIN, LOW);
 
-    if (pkt.alert_level > 0) {
-      soundAlarm();
-    } else if (pkt.text_msg[0] != '\0') {
-      playToneBeep(1400, 60);
-    }
+    if (pkt.alert_level > 0) soundAlarm();
+    else playToneBeep(1400, 60);
 
     saveToInbox(pkt, rssi);
-
-    Serial.println(F("✅ [RX ACCEPTED] Message stored in inbox & displayed on screen!"));
 
     lastRxNode = pkt.originNode;
     lastRxRssi = rssi;
@@ -971,42 +1122,28 @@ void processIncomingPacket(int packetSize) {
     lastRxMsg[sizeof(lastRxMsg) - 1] = '\0';
     lastRxPktType = pkt.packetType;
     lastRxAlertLevel = pkt.alert_level;
+    lastRxDirect = toMe;
     lastRxTime = millis();
 
+    // Direct messages are confirmed to the sender (broadcasts are not, to avoid ACK storms).
+    if (toMe) sendAck(pkt.originNode, msgId);
+
     if (uiState == UI_STATE_IDLE || pkt.alert_level > 0) {
-      if (pkt.alert_level > 0) {
-        uiState = UI_STATE_IDLE;
-      }
+      uiState = UI_STATE_IDLE;
       updateOledDisplay();
     }
-  } else {
-    Serial.print(F("ℹ️ [RX NOT FOR THIS NODE] Packet target is #"));
-    Serial.print(pkt.targetNode);
-    Serial.print(F(", but this node is #"));
-    Serial.print(currentWalkieNodeId);
-    Serial.println(F(" -> Relaying to mesh."));
+    if (toMe) return; // final destination: no relay
   }
-  Serial.println(F("=============================================="));
 
-  // Automatic LoRa Mesh Relay Forwarding (if TTL > 1)
+  // ── Mesh relay (weather, heartbeats, and messages for other nodes) ──────
   if (pkt.ttl > 1) {
-    LoRaMeshPacket relayPkt = pkt;
-    relayPkt.ttl -= 1;
+    pkt.ttl -= 1;
     delay(random(50, 150));
-
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    LoRa.beginPacket();
-    LoRa.write((uint8_t*)&relayPkt, sizeof(relayPkt));
-    LoRa.endPacket();
-    digitalWrite(STATUS_LED_PIN, LOW);
-
-    LoRa.receive();
-
-    Serial.print(F("🚀 [WALKIE RELAY] Forwarded MsgID=#"));
-    Serial.print(msgId);
-    Serial.print(F(" (New TTL="));
-    Serial.print(relayPkt.ttl);
-    Serial.println(F(")"));
+    transmitPacket(pkt);
+    Serial.print(F("🔁 [RELAY] MsgID=#")); Serial.print(msgId);
+    Serial.print(F(" from #")); Serial.print(pkt.originNode);
+    Serial.print(F(" type ")); Serial.print(pkt.packetType);
+    Serial.print(F(" (TTL ")); Serial.print(pkt.ttl); Serial.println(F(")"));
   }
 }
 
@@ -1017,6 +1154,11 @@ void setup() {
 
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
+
+  // Start message IDs at a random value: after a reboot, IDs restarting at 1
+  // would be dropped as duplicates by radios that still remember the old ones.
+  randomSeed(analogRead(A0) ^ ((uint32_t)analogRead(A1) << 10) ^ micros());
+  msgCounter = (uint16_t)random(1, 65000);
 
   pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
   pinMode(BTN_CLICK_PIN,  INPUT_PULLUP);
@@ -1074,6 +1216,9 @@ void loop() {
 
   // 2. Hardware Button Polling
   checkButtons();
+
+  // 2b. Re-send unconfirmed direct messages
+  checkPendingAck();
 
   // 3. Auto-Dismiss Status Splash
   if (uiState == UI_STATE_SPLASH && (millis() - splashStartTime >= 1400)) {
