@@ -548,15 +548,19 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
 void handleUplinkPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
   // ACKs are radio-level confirmations, not sensor data: never forward them as telemetry.
   if (pkt.packetType == PKT_TYPE_ACK) {
-    if (pkt.targetNode == 0) {
-      Serial.printf("[ACK] Node #%u confirmed BASE message (%s)\n", pkt.originNode, pkt.text_msg);
+    if (pkt.targetNode == 0 && WiFi.status() == WL_CONNECTED) {
+      reportWalkieAck(pkt.originNode, (uint16_t)atol(pkt.text_msg + 4)); // "ACK <msgId>"
     }
     return;
   }
-  if (pkt.packetType == PKT_TYPE_TEXT || pkt.packetType == PKT_TYPE_SOS) {
+  // Walkie traffic (text, SOS, heartbeats) goes to the messages API; only weather packets
+  // are station telemetry. (Sending walkie packets as telemetry too created duplicate SOS
+  // records and fake "weather stations" for walkies.)
+  if (pkt.packetType == PKT_TYPE_TEXT || pkt.packetType == PKT_TYPE_SOS || pkt.packetType == PKT_TYPE_HEARTBEAT) {
     forwardMessageToCloudApi(pkt, rssi, snr);
+    return;
   }
-  forwardToCloudApi(pkt, rssi, snr); // Also record into standard telemetry stream
+  forwardToCloudApi(pkt, rssi, snr);
 }
 
 void forwardMessageToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
@@ -582,7 +586,7 @@ void forwardMessageToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   postData += "\"gateway_id\":\"" + String(FLAPMAIN_DEVICE_ID) + "\",";
   postData += "\"origin_node\":" + String(pkt.originNode) + ",";
   postData += "\"target_node\":" + String(pkt.targetNode) + ",";
-  postData += "\"message_type\":\"" + String(pkt.packetType == PKT_TYPE_SOS ? "sos" : "text") + "\",";
+  postData += "\"message_type\":\"" + String(pkt.packetType == PKT_TYPE_SOS ? "sos" : (pkt.packetType == PKT_TYPE_HEARTBEAT ? "heartbeat" : "text")) + "\",";
   postData += "\"text\":\"" + safeText + "\",";
   postData += "\"alert_level\":" + String(pkt.alert_level) + ",";
   postData += "\"battery_mv\":" + String(pkt.battery_mv) + ",";
@@ -648,6 +652,44 @@ int extractJsonInt(const String &body, const String &key) {
   return body.substring(start, end).toInt();
 }
 
+// Recent dashboard -> walkie messages, so a walkie's ACK can be matched to its outbox entry.
+struct SentDownlink { uint16_t msgId; uint8_t target; char outboxId[25]; };
+SentDownlink sentDownlinks[8];
+uint8_t sentDownlinkIdx = 0;
+
+void rememberDownlink(uint16_t msgId, uint8_t target, const String &outboxId) {
+  SentDownlink &d = sentDownlinks[sentDownlinkIdx];
+  d.msgId = msgId;
+  d.target = target;
+  strncpy(d.outboxId, outboxId.c_str(), sizeof(d.outboxId) - 1);
+  d.outboxId[sizeof(d.outboxId) - 1] = '\0';
+  sentDownlinkIdx = (sentDownlinkIdx + 1) % 8;
+}
+
+// A walkie confirmed a dashboard message ("ACK <msgId>" addressed to BASE): tell the server.
+void reportWalkieAck(uint8_t fromNode, uint16_t ackedId) {
+  for (SentDownlink &d : sentDownlinks) {
+    if (d.outboxId[0] && d.msgId == ackedId && d.target == fromNode) {
+      WiFiClient client;
+      HTTPClient http;
+      String url = buildApiUrl(String("/v1/devices/outbox/") + d.outboxId + "/confirm");
+      if (String(FLAPMAIN_SERVER).startsWith("https")) {
+        secureClient.setInsecure();
+        http.begin(secureClient, url);
+      } else {
+        http.begin(client, url);
+      }
+      http.addHeader("Content-Type", "application/json");
+      http.addHeader("X-Device-Key", FLAPMAIN_DEVICE_KEY);
+      int code = http.POST(String("{\"node\":") + fromNode + "}");
+      http.end();
+      Serial.printf("[ACK] Walkie #%u confirmed dashboard message %s (HTTP %d)\n", fromNode, d.outboxId, code);
+      d.outboxId[0] = '\0';
+      return;
+    }
+  }
+}
+
 void acknowledgeOutboxDelivered(const String &outboxId) {
   if (outboxId.length() == 0) return;
 
@@ -704,6 +746,7 @@ void pollOutboxAndRelay() {
   memset(&pkt, 0, sizeof(pkt));
   uint16_t msgId = nextBaseMsgId();
   dedupCache.markSeen(0, msgId);
+  if (targetNode > 0) rememberDownlink(msgId, (uint8_t)targetNode, outboxId); // walkies ACK direct messages
 
   pkt.msgIdHi    = msgId >> 8;
   pkt.msgIdLo    = msgId & 0xFF;

@@ -8,15 +8,34 @@ import {
 import { API_BASE_URL, authHeaders, socketOptions } from '../config';
 import { io } from 'socket.io-client';
 
-const INITIAL_REGISTERED_NODES = [
-  { id: 101, name: 'Walkie Alpha (Nano)', type: 'Hardware Walkie-Talkie', freq: '433 MHz', sf: 'SF10', role: 'walkie' },
-  { id: 102, name: 'Walkie Bravo (Nano)', type: 'Hardware Walkie-Talkie', freq: '433 MHz', sf: 'SF10', role: 'walkie' },
-  { id: 103, name: 'Walkie Charlie (ESP8266)', type: 'Hardware Walkie-Talkie', freq: '433 MHz', sf: 'SF10', role: 'walkie' },
-  { id: 0, name: 'Base Station (Gateway)', type: 'ESP LoRa Gateway', freq: '433 MHz / Wi-Fi', sf: 'SF10', role: 'gateway' },
-  { id: 1, name: 'AWS Weather Node #1', type: 'Automatic Weather Station', freq: '433 MHz', sf: 'SF10', role: 'weather' },
-  { id: 2, name: 'AWS Weather Node #2', type: 'Automatic Weather Station', freq: '433 MHz', sf: 'SF10', role: 'weather' },
-  { id: 3, name: 'AWS Weather Node #3', type: 'Automatic Weather Station', freq: '433 MHz', sf: 'SF10', role: 'weather' }
+// Shown until /v1/devices/mesh/nodes answers (walkie names match the walkie firmware).
+const FALLBACK_NODES = [
+  { node: 101, name: 'Walkie Alpha', role: 'walkie' },
+  { node: 102, name: 'Walkie Bravo', role: 'walkie' },
+  { node: 103, name: 'Walkie Charlie', role: 'walkie' },
+  { node: 104, name: 'Walkie Delta', role: 'walkie' },
 ];
+
+// The LoRa text field holds 31 bytes (about 10 Nepali letters, 31 English).
+const MAX_LORA_BYTES = 31;
+const utf8Len = (s) => new TextEncoder().encode(s).length;
+const clipToBytes = (s, max = MAX_LORA_BYTES) => {
+  let out = '';
+  for (const ch of s) { if (utf8Len(out + ch) > max) break; out += ch; }
+  return out;
+};
+
+const mapUrl = (lat, lon) => `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
+const hasFix = (m) => m && m.lat !== null && m.lat !== undefined && m.lon !== null && m.lon !== undefined;
+
+const timeAgo = (t) => {
+  if (!t) return 'never';
+  const s = Math.max(0, Math.floor((Date.now() - new Date(t).getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return new Date(t).toLocaleDateString();
+};
 
 const EMERGENCY_PRESETS = [
   { label: '🚨 EVACUATE NOW', text: 'CRITICAL EMERGENCY: EVACUATE AREA IMMEDIATELY!' },
@@ -64,6 +83,13 @@ const SosAlert = () => {
   const [sosFilter, setSosFilter] = useState('all'); // 'all', 'critical', 'walkie', 'weather'
   const [dismissedAlertIds, setDismissedAlertIds] = useState(new Set());
   const [nodeLiveStatus, setNodeLiveStatus] = useState({}); // { [nodeId]: { online, lastSeen, alertLevel } }
+  const [meshNodes, setMeshNodes] = useState(FALLBACK_NODES); // from /v1/devices/mesh/nodes
+
+  const nodeLabel = (id) => {
+    if (Number(id) === 0) return 'Base station';
+    const n = meshNodes.find(x => x.node === Number(id));
+    return n && n.name ? `${n.name} (#${id})` : `Node #${id}`;
+  };
 
   const chatEndRef = useRef(null);
 
@@ -136,7 +162,7 @@ const SosAlert = () => {
       .then(res => res.json())
       .then(data => {
         if (data.messages && Array.isArray(data.messages)) {
-          setMeshMessages(data.messages);
+          setMeshMessages(data.messages.filter(m => m.kind !== 'heartbeat'));
 
           // Check if any message is an active SOS
           const latestSosMsg = data.messages.find(m => m.alert_level > 0 || m.message_type === 'sos');
@@ -150,6 +176,17 @@ const SosAlert = () => {
         }
       })
       .catch(err => console.warn('Failed to fetch mesh message history:', err));
+  }, [baseApiUrl]);
+
+  // 1b. Mesh node list (names, last seen, battery, location, SOS state); refreshed every minute
+  useEffect(() => {
+    const load = () => fetch(`${baseApiUrl}/v1/devices/mesh/nodes`, { headers: authHeaders() })
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => { if (data && Array.isArray(data.nodes) && data.nodes.length) setMeshNodes(data.nodes); })
+      .catch(() => {});
+    load();
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
   }, [baseApiUrl]);
 
   // 2. Real-time Socket.io Live Stream Listeners
@@ -186,13 +223,20 @@ const SosAlert = () => {
 
     // B. Walkie-Talkie Mesh Message Event
     const handleIncomingMeshMessage = (msg) => {
-      setMeshMessages(prev => {
-        if (prev.some(m => String(m._id) === String(msg._id))) return prev;
-        return [...prev, msg].slice(-100);
-      });
+      if (msg.kind !== 'heartbeat') {
+        setMeshMessages(prev => {
+          if (prev.some(m => String(m._id) === String(msg._id))) return prev;
+          return [...prev, msg].slice(-100);
+        });
+      }
+      if (!msg.is_downlink && msg.origin_node) {
+        setMeshNodes(prev => prev.some(n => n.node === msg.origin_node)
+          ? prev.map(n => (n.node === msg.origin_node ? { ...n, last_heard: msg.timestamp, battery_mv: msg.battery_mv, rssi: msg.rssi } : n))
+          : [...prev, { node: msg.origin_node, role: 'walkie', last_heard: msg.timestamp, battery_mv: msg.battery_mv, rssi: msg.rssi }]);
+      }
 
-      const isSos = msg.alert_level > 0 || msg.message_type === 'sos';
-      if (isSos) {
+      const isSos = msg.kind ? msg.kind === 'sos' : (msg.alert_level > 0 || msg.message_type === 'sos');
+      if (isSos && !msg.is_downlink) {
         const sosRecord = {
           _id: msg._id,
           source: 'mesh_message',
@@ -203,6 +247,10 @@ const SosAlert = () => {
           alert_level: msg.alert_level || 2,
           alert_level_name: msg.alert_level === 1 ? 'WARNING' : 'EMERGENCY SOS',
           message: msg.text,
+          sos_type: msg.sos_type,
+          lat: msg.lat,
+          lon: msg.lon,
+          acc: msg.acc,
           timestamp: msg.timestamp || new Date().toISOString(),
           battery_mv: msg.battery_mv,
           rssi: msg.rssi,
@@ -259,6 +307,27 @@ const SosAlert = () => {
       }));
     };
 
+    // D. A walkie cancelled its SOS
+    socket.on('sos_cancelled', ({ origin_node }) => {
+      setSosHistory(prev => prev.map(a => (a.origin_node === origin_node ? { ...a, cancelled: true } : a)));
+      setActiveSosAlert(prev => (prev && prev.origin_node === origin_node ? null : prev));
+      setNodeLiveStatus(prev => ({ ...prev, [origin_node]: { ...(prev[origin_node] || {}), alertLevel: 0 } }));
+      setMeshNodes(prev => prev.map(n => (n.node === origin_node ? { ...n, sos_active: false } : n)));
+    });
+
+    // E. A walkie shared its location
+    socket.on('mesh_node_location', ({ origin_node, lat, lon, acc, timestamp }) => {
+      setMeshNodes(prev => prev.map(n => (n.node === origin_node ? { ...n, last_lat: lat, last_lon: lon, last_acc: acc, loc_at: timestamp } : n)));
+    });
+
+    // F. Delivery of dashboard messages: transmitted by the gateway / confirmed by the walkie
+    socket.on('mesh_message_sent', ({ _id }) => {
+      setMeshMessages(prev => prev.map(m => (String(m._id) === String(_id) ? { ...m, sent: true } : m)));
+    });
+    socket.on('mesh_message_confirmed', ({ _id, node }) => {
+      setMeshMessages(prev => prev.map(m => (String(m._id) === String(_id) ? { ...m, sent: true, confirmed: true, confirmed_by: node } : m)));
+    });
+
     socket.on('new_sos_alert', handleIncomingSosAlert);
     socket.on('new_mesh_message', handleIncomingMeshMessage);
     socket.on('new_weather_reading', handleIncomingTelemetry);
@@ -288,7 +357,7 @@ const SosAlert = () => {
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           target_node: targetNode,
-          text: textToSend || 'CRITICAL EMERGENCY SOS BROADCAST FROM BASE STATION!',
+          text: clipToBytes(textToSend || 'SOS FROM BASE STATION!'),
           alert_level: isSos ? 2 : 0,
           gateway_id: 'esp_gateway_node_01'
         })
@@ -309,7 +378,7 @@ const SosAlert = () => {
   const handleAcknowledgeActiveSos = () => {
     if (!activeSosAlert) return;
     const origin = activeSosAlert.origin_node || activeSosAlert.mesh_origin_node || 0;
-    const ackMsg = `BASE STATION ACK: SOS RECEIVED FROM NODE #${origin}. HELP EN ROUTE!`;
+    const ackMsg = `SOS #${origin} RECEIVED. HELP COMING`;
     handleSendMessage(false, ackMsg);
     
     // Dismiss active banner
@@ -437,12 +506,19 @@ const SosAlert = () => {
                 </div>
 
                 <div style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-main)', marginTop: 4 }}>
+                  {activeSosAlert.sos_type && <span style={{ marginRight: 8 }}>{activeSosAlert.sos_type} SOS ·</span>}
                   "{activeSosAlert.message || activeSosAlert.text || activeSosAlert.text_msg || 'EMERGENCY DISTRESS SIGNAL'}"
                 </div>
+                {hasFix(activeSosAlert) && (
+                  <a href={mapUrl(activeSosAlert.lat, activeSosAlert.lon)} target="_blank" rel="noopener noreferrer"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 6, fontWeight: 700, color: 'var(--status-error)' }}>
+                    <ExternalLink size={14} /> Open location on map ({activeSosAlert.lat.toFixed(5)}, {activeSosAlert.lon.toFixed(5)}{activeSosAlert.acc ? `, ±${activeSosAlert.acc} m` : ''})
+                  </a>
+                )}
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', marginTop: 8, fontSize: '0.82rem', color: 'var(--text-dim)' }}>
                   <span>
-                    <strong>Origin Node:</strong> #{activeSosAlert.origin_node || activeSosAlert.mesh_origin_node || 1} ({activeSosAlert.device_id || 'Hardware Node'})
+                    <strong>From:</strong> {nodeLabel(activeSosAlert.origin_node ?? activeSosAlert.mesh_origin_node ?? 1)}
                   </span>
                   <span>
                     <strong>Time:</strong> {new Date(activeSosAlert.timestamp || Date.now()).toLocaleTimeString()}
@@ -637,7 +713,7 @@ const SosAlert = () => {
                           border: '1px solid var(--border-strong)',
                           color: 'var(--text-main)'
                         }}>
-                          {String(item.source_type || '').includes('Weather') ? '📡' : '📻'} Node #{originNode}
+                          {String(item.source_type || '').includes('Weather') ? '📡' : '📻'} {nodeLabel(originNode)}
                         </span>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 2 }}>
                           {item.source_type || 'LoRa Node'}
@@ -654,13 +730,24 @@ const SosAlert = () => {
                           background: isCritical ? 'var(--status-error)' : 'rgba(245, 158, 11, 0.2)',
                           color: isCritical ? '#ffffff' : '#f59e0b'
                         }}>
-                          {isCritical ? '🚨 CRITICAL SOS' : '⚠️ WARNING (LVL 1)'}
+                          {isCritical ? `🚨 ${item.sos_type || 'CRITICAL'} SOS` : '⚠️ WARNING (LVL 1)'}
                         </span>
+                        {item.cancelled && (
+                          <div style={{ marginTop: 4, fontSize: '0.7rem', fontWeight: 700, color: '#10b981' }}>✅ Cancelled by sender</div>
+                        )}
                       </td>
 
                       {/* Message Content */}
                       <td style={{ padding: '10px 14px', fontWeight: 600, color: isCritical ? 'var(--status-error)' : 'var(--text-main)' }}>
                         {item.message || item.text || item.text_msg || 'Emergency distress signal'}
+                        {hasFix(item) && (
+                          <div>
+                            <a href={mapUrl(item.lat, item.lon)} target="_blank" rel="noopener noreferrer"
+                              style={{ fontSize: '0.74rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                              <ExternalLink size={11} /> Map ({item.lat.toFixed(4)}, {item.lon.toFixed(4)})
+                            </a>
+                          </div>
+                        )}
                       </td>
 
                       {/* Telemetry / RF link */}
@@ -677,7 +764,7 @@ const SosAlert = () => {
                         <button
                           onClick={() => {
                             setTargetNode(originNode);
-                            setOutgoingText(`BASE STATION ACK TO NODE #${originNode}: WE RECEIVE YOUR SOS. DISPATCHING ASSISTANCE!`);
+                            setOutgoingText('SOS RECEIVED. HELP ON THE WAY');
                           }}
                           className="btn btn-secondary"
                           style={{
@@ -778,8 +865,12 @@ const SosAlert = () => {
             </div>
           ) : (
             meshMessages.map((msg, idx) => {
-              const isSos = msg.alert_level > 0 || msg.message_type === 'sos';
+              const isSos = msg.kind ? msg.kind === 'sos' : (msg.alert_level > 0 || msg.message_type === 'sos');
               const isDownlink = msg.is_downlink || msg.origin_node === 0;
+              const delivery = !isDownlink ? null
+                : msg.confirmed ? `✓✓ Delivered to ${nodeLabel(msg.confirmed_by ?? msg.target_node)}`
+                : msg.sent ? (msg.target_node ? '✓ Sent over LoRa · waiting for the walkie to confirm' : '✓ Sent over LoRa')
+                : '⏳ Queued for the gateway';
 
               return (
                 <div key={msg._id || idx} style={{
@@ -794,10 +885,10 @@ const SosAlert = () => {
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, fontSize: '0.78rem', marginBottom: 6, opacity: 0.9 }}>
                     <span style={{ fontWeight: 800, color: isSos ? 'var(--status-error)' : (isDownlink ? 'var(--action-primary)' : 'var(--text-dim)') }}>
-                      {isDownlink ? '☁️ Base Station (Cloud Web App)' : `📻 Walkie Node #${msg.origin_node || msg.mesh_origin_node || 'Unknown'}`}
+                      {isDownlink ? '☁️ Base Station (Cloud Web App)' : `📻 ${nodeLabel(msg.origin_node || msg.mesh_origin_node || 0)}`}
                       {msg.target_node !== undefined && (
                         <span style={{ marginLeft: 8, opacity: 0.8, fontSize: '0.74rem', color: msg.target_node === 0 ? 'var(--text-muted)' : 'var(--action-primary)' }}>
-                          {msg.target_node === 0 ? '📢 Broadcast' : `🎯 To Node #${msg.target_node}`}
+                          {msg.target_node === 0 ? '📢 Broadcast' : `🎯 To ${nodeLabel(msg.target_node)}`}
                         </span>
                       )}
                     </span>
@@ -807,9 +898,31 @@ const SosAlert = () => {
                   </div>
                   
                   <div style={{ fontSize: '1rem', fontWeight: 600, wordBreak: 'break-word', color: isSos ? 'var(--status-error)' : 'var(--text-main)' }}>
-                    {isSos && <span style={{ fontWeight: 900, marginRight: 6 }}>🚨 EMERGENCY SOS:</span>}
-                    {msg.text || msg.text_msg}
+                    {msg.kind === 'loc' ? (
+                      <span>📍 Shared location{msg.acc ? ` (±${msg.acc} m)` : ''}</span>
+                    ) : msg.kind === 'sos_cancel' ? (
+                      <span style={{ color: '#10b981' }}>✅ SOS cancelled</span>
+                    ) : (
+                      <>
+                        {isSos && <span style={{ fontWeight: 900, marginRight: 6 }}>🚨 {msg.sos_type ? `${msg.sos_type} SOS` : 'EMERGENCY SOS'}:</span>}
+                        {msg.text || msg.text_msg}
+                      </>
+                    )}
+                    {hasFix(msg) && (
+                      <div style={{ marginTop: 4 }}>
+                        <a href={mapUrl(msg.lat, msg.lon)} target="_blank" rel="noopener noreferrer"
+                          style={{ fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          <ExternalLink size={12} /> {msg.lat.toFixed(5)}, {msg.lon.toFixed(5)} on map
+                        </a>
+                      </div>
+                    )}
                   </div>
+
+                  {delivery && (
+                    <div style={{ textAlign: 'right', fontSize: '0.72rem', marginTop: 6, color: msg.confirmed ? '#10b981' : 'var(--text-muted)', fontWeight: msg.confirmed ? 700 : 500 }}>
+                      {delivery}
+                    </div>
+                  )}
 
                   {!isDownlink && (
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12, fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 6 }}>
@@ -843,16 +956,11 @@ const SosAlert = () => {
               cursor: 'pointer'
             }}
           >
-            <option value={0}>📢 Broadcast (All Mesh Nodes)</option>
-            <optgroup label="Walkie-Talkie Nodes">
-              <option value={101}>📻 Node #101 (Walkie Alpha)</option>
-              <option value={102}>📻 Node #102 (Walkie Bravo)</option>
-              <option value={103}>📻 Node #103 (ESP Walkie Charlie)</option>
-            </optgroup>
-            <optgroup label="Automatic Weather Station Nodes">
-              <option value={1}>📡 Node #1 (Primary AWS Station)</option>
-              <option value={2}>📡 Node #2 (AWS Station 2)</option>
-              <option value={3}>📡 Node #3 (AWS Station 3)</option>
+            <option value={0}>📢 Broadcast (all walkies)</option>
+            <optgroup label="Walkie-talkies (direct messages are confirmed)">
+              {meshNodes.filter(n => n.role === 'walkie').map(n => (
+                <option key={n.node} value={n.node}>📻 {n.name || 'Walkie'} (#{n.node})</option>
+              ))}
             </optgroup>
           </select>
 
@@ -860,9 +968,9 @@ const SosAlert = () => {
             type="text"
             placeholder="Type message to broadcast to hardware LoRa Mesh OLED displays..."
             value={outgoingText}
-            onChange={(e) => setOutgoingText(e.target.value)}
+            onChange={(e) => setOutgoingText(clipToBytes(e.target.value))}
             onKeyDown={(e) => e.key === 'Enter' && handleSendMessage(false)}
-            maxLength={31}
+            title={`${utf8Len(outgoingText)}/${MAX_LORA_BYTES} bytes (the radio packet limit)`}
             style={{
               flex: 1,
               minWidth: 260,
@@ -875,6 +983,10 @@ const SosAlert = () => {
               outline: 'none'
             }}
           />
+
+          <span style={{ alignSelf: 'center', fontSize: '0.75rem', fontWeight: 600, color: utf8Len(outgoingText) >= MAX_LORA_BYTES ? 'var(--status-error)' : 'var(--text-muted)' }}>
+            {utf8Len(outgoingText)}/{MAX_LORA_BYTES} bytes
+          </span>
 
           <button
             onClick={() => handleSendMessage(false)}
@@ -916,15 +1028,17 @@ const SosAlert = () => {
         </h3>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 }}>
-          {INITIAL_REGISTERED_NODES.map(node => {
+          {meshNodes.map(n => {
+            const node = { ...n, id: n.node };
             const live = nodeLiveStatus[node.id] || {};
-            const isAlerting = live.alertLevel && live.alertLevel > 0;
-            const isOnline = live.online || node.id === 0;
+            const lastHeard = live.lastSeen || n.last_heard || n.last_seen;
+            const isAlerting = (live.alertLevel && live.alertLevel > 0) || n.sos_active;
+            const isOnline = live.online || (lastHeard && Date.now() - new Date(lastHeard).getTime() < 10 * 60 * 1000);
 
             return (
               <div
                 key={node.id}
-                onClick={() => setTargetNode(node.id)}
+                onClick={() => node.role === 'walkie' && setTargetNode(node.id)}
                 style={{
                   padding: 16,
                   background: isAlerting ? 'var(--status-error-bg)' : 'var(--bg-app)',
@@ -937,11 +1051,11 @@ const SosAlert = () => {
                   transition: 'all 0.2s ease',
                   boxShadow: isAlerting ? '0 0 15px rgba(225, 29, 72, 0.2)' : 'none'
                 }}
-                title={`Click to set Node #${node.id} as communicator target`}
+                title={node.role === 'walkie' ? `Click to message ${node.name || `node #${node.id}`}` : undefined}
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span style={{ fontWeight: 800, fontSize: '0.95rem', color: isAlerting ? 'var(--status-error)' : 'var(--text-main)' }}>
-                    {node.role === 'weather' ? '📡' : (node.role === 'gateway' ? '🌐' : '📻')} {node.name}
+                    {node.role === 'station' ? '📡' : '📻'} {node.name || `Node #${node.id}`}
                   </span>
                   <span style={{
                     fontSize: '0.7rem', fontWeight: 700, padding: '2px 8px', borderRadius: 8,
@@ -949,12 +1063,23 @@ const SosAlert = () => {
                     color: isAlerting ? '#ffffff' : (isOnline ? '#10b981' : 'var(--text-muted)'),
                     border: isAlerting ? 'none' : `1px solid ${isOnline ? '#10b981' : 'var(--border-subtle)'}`
                   }}>
-                    {isAlerting ? '🚨 SOS ALERT' : (isOnline ? 'ONLINE' : 'STANDBY')}
+                    {isAlerting ? `🚨 ${n.sos_type || ''} SOS`.replace('  ', ' ') : (isOnline ? 'ONLINE' : 'STANDBY')}
                   </span>
                 </div>
                 <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                  {node.type} • {node.freq} ({node.sf})
+                  Node #{node.id} · {node.role === 'station' ? 'Weather station' : 'Walkie-talkie'}{n.registered ? '' : ' · not added yet'}
                 </div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                  Last heard {timeAgo(lastHeard)}
+                  {n.battery_mv ? ` · ${(n.battery_mv / 1000).toFixed(2)} V` : ''}
+                  {n.rssi ? ` · ${n.rssi} dBm` : ''}
+                </div>
+                {n.last_lat != null && n.last_lon != null && (
+                  <a href={mapUrl(n.last_lat, n.last_lon)} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
+                    style={{ fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    <ExternalLink size={11} /> Last location {timeAgo(n.loc_at)}
+                  </a>
+                )}
               </div>
             );
           })}

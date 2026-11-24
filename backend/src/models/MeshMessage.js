@@ -17,9 +17,19 @@ const MeshMessageSchema = new mongoose.Schema(
     hops_left: { type: Number, default: 0 },
     rssi: { type: Number, default: 0 },
     snr: { type: Number, default: 0 },
-    // Downlink outbox state
+    // Parsed from the text conventions (see services/meshText.js)
+    kind: { type: String, enum: ['msg', 'loc', 'sos', 'sos_cancel', 'heartbeat'], default: 'msg' },
+    sos_type: { type: String, default: null },
+    lat: { type: Number, default: null },
+    lon: { type: Number, default: null },
+    acc: { type: Number, default: null },
+    // Downlink outbox state: delivered = the gateway transmitted it over LoRa;
+    // confirmed = the target walkie sent an ACK back (direct messages only)
     delivered: { type: Boolean, default: false },
     delivery_attempts: { type: Number, default: 0 },
+    confirmed: { type: Boolean, default: false },
+    confirmed_by: { type: Number, default: null },
+    confirmed_at: { type: Date, default: null },
     timestamp: { type: Date, default: Date.now },
   },
   { versionKey: false }
@@ -27,6 +37,7 @@ const MeshMessageSchema = new mongoose.Schema(
 
 MeshMessageSchema.index({ timestamp: -1 });
 MeshMessageSchema.index({ direction: 1, delivered: 1, timestamp: 1 });
+MeshMessageSchema.index({ origin_node: 1, timestamp: -1 });
 // Keep 90 days of mesh traffic
 MeshMessageSchema.index({ timestamp: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
 

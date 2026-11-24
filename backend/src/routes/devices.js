@@ -21,6 +21,7 @@ const { evaluateAlertRules } = require('../services/alertEngine');
 const { checkOutboundUrl, postJson } = require('../services/outboundUrl');
 const { lookupCardHolder } = require('../services/flapCardLookup');
 const { readingTimeFrom, isDuplicatePacket, mergeHeardBy, heardByStale, recordDiscovery } = require('../services/meshIngest');
+const { parseMeshText, utf8Truncate, radioNodeOf, WALKIE_NAMES } = require('../services/meshText');
 const DiscoveredNode = require('../models/DiscoveredNode');
 const PendingReading = require('../models/PendingReading');
 
@@ -1863,6 +1864,15 @@ const toClientMessage = (m) => ({
   rssi: m.rssi,
   snr: m.snr,
   is_downlink: m.direction === 'downlink' || undefined,
+  kind: m.kind || 'msg',
+  sos_type: m.sos_type || null,
+  lat: m.lat ?? null,
+  lon: m.lon ?? null,
+  acc: m.acc ?? null,
+  // downlink: sent = transmitted by the gateway; confirmed = the walkie ACKed it
+  sent: m.direction === 'downlink' ? !!m.delivered : undefined,
+  confirmed: m.direction === 'downlink' ? !!m.confirmed : undefined,
+  confirmed_by: m.confirmed_by ?? undefined,
   timestamp: new Date(m.timestamp).toISOString(),
 });
 
@@ -1878,18 +1888,20 @@ const recentMeshMessages = async (limit = 100) => {
 router.post('/messages', requireDeviceOrUser, async (req, res) => {
   try {
     const { gateway_id, origin_node, target_node, message_type, text, alert_level, battery_mv, hops_left, rssi, snr } = req.body;
-    
-    console.log(`[LORA MESH UPLINK MESSAGE]: Node #${origin_node} -> Target #${target_node || 0} (${message_type}): "${text}" (Alert: ${alert_level}, RSSI: ${rssi}dBm)`);
+    const parsed = parseMeshText(text, { messageType: message_type, alertLevel: alert_level });
+
+    console.log(`[LORA MESH UPLINK ${parsed.kind.toUpperCase()}]: Node #${origin_node} -> Target #${target_node || 0} (${message_type}): "${text}" (Alert: ${alert_level}, RSSI: ${rssi}dBm)`);
 
     const doc = await MeshMessage.create({
+      ...parsed,
       direction: 'uplink',
       gateway_id: String(gateway_id || 'esp_gateway_node_01'),
       device_id: `flap-walkie-${String(origin_node).padStart(3, '0')}`,
       origin_node: Number(origin_node) || 0,
       target_node: Number(target_node) || 0,
-      message_type: String(message_type || 'text'),
+      message_type: parsed.kind === 'sos' ? 'sos' : String(message_type || 'text'),
       text: String(text || '').substring(0, 256),
-      alert_level: Number(alert_level) || 0,
+      alert_level: parsed.kind === 'sos' ? Math.max(2, Number(alert_level) || 0) : Number(alert_level) || 0,
       battery_mv: Number(battery_mv) || 0,
       hops_left: Number(hops_left) || 0,
       rssi: Number(rssi) || 0,
@@ -1916,9 +1928,22 @@ router.post('/messages', requireDeviceOrUser, async (req, res) => {
         }
       });
 
-      // Emit dedicated new_sos_alert if walkie uplink is an SOS or has alert_level > 0
-      if (msgData.alert_level > 0 || msgData.message_type === 'sos') {
+      if (msgData.kind === 'sos_cancel') {
+        io.emit('sos_cancelled', { origin_node: msgData.origin_node, timestamp: msgData.timestamp });
+      }
+      if (msgData.lat !== null && msgData.lon !== null) {
+        io.emit('mesh_node_location', {
+          origin_node: msgData.origin_node, lat: msgData.lat, lon: msgData.lon, acc: msgData.acc, timestamp: msgData.timestamp,
+        });
+      }
+
+      // Emit dedicated new_sos_alert if walkie uplink is an SOS
+      if (msgData.kind === 'sos') {
         io.emit('new_sos_alert', {
+          sos_type: msgData.sos_type,
+          lat: msgData.lat,
+          lon: msgData.lon,
+          acc: msgData.acc,
           _id: msgData._id,
           source: 'mesh_message',
           source_type: 'LoRa Walkie-Talkie',
@@ -1963,8 +1988,8 @@ router.post('/send-message', authenticateUser, async (req, res) => {
       origin_node: 0,
       target_node: Number(target_node) || 0,
       message_type: alertLvl > 0 ? 'sos' : 'text',
-      // LoRa packet text field is 32 bytes incl. NUL
-      text: String(text).trim().substring(0, 31),
+      // LoRa packet text field is 32 bytes incl. NUL: cut at 31 bytes on a character boundary
+      text: utf8Truncate(String(text).trim(), 31),
       alert_level: alertLvl,
       delivered: false,
     });
@@ -2030,7 +2055,15 @@ router.get('/sos/history', authenticateUser, async (req, res) => {
     // 1. SOS alerts from LoRa Mesh Walkie-Talkies
     const meshSosDocs = await MeshMessage.find({ $or: [{ alert_level: { $gt: 0 } }, { message_type: 'sos' }] })
       .sort({ timestamp: -1 }).limit(100).lean();
-    const meshSos = meshSosDocs.map(toClientMessage).map(m => ({
+    // An SOS counts as cancelled if the same node sent SOS-CANCEL afterwards
+    const cancels = await MeshMessage.find({ kind: 'sos_cancel' }).sort({ timestamp: -1 }).limit(200).select('origin_node timestamp').lean();
+    const cancelledAfter = (node, ts) => cancels.some(c => c.origin_node === node && c.timestamp > ts);
+    const meshSos = meshSosDocs.filter(d => d.kind !== 'sos_cancel').map(d => ({ ...toClientMessage(d), cancelled: cancelledAfter(d.origin_node, d.timestamp) })).map(m => ({
+      sos_type: m.sos_type,
+      lat: m.lat,
+      lon: m.lon,
+      acc: m.acc,
+      cancelled: m.cancelled,
       _id: m._id,
       source: 'mesh_message',
       source_type: 'LoRa Walkie-Talkie',
@@ -2147,7 +2180,97 @@ router.post('/outbox/:outboxId/ack', requireDeviceOrUser, async (req, res) => {
   }
   await MeshMessage.updateOne({ _id: outboxId, direction: 'downlink' }, { $set: { delivered: true } }).catch(() => {});
   console.log(`[LORA MESH DOWNLINK ACKNOWLEDGED]: Message ${outboxId} delivered to mesh.`);
+  const io = req.app.get('io');
+  if (io) io.emit('mesh_message_sent', { _id: outboxId });
   res.json({ status: 'success', message: 'Outbox message acknowledged' });
+});
+
+/**
+ * @route   POST /v1/devices/outbox/:outboxId/confirm   { node }
+ * @desc    The gateway heard the target walkie's ACK for this downlink message
+ */
+router.post('/outbox/:outboxId/confirm', requireDeviceOrUser, async (req, res) => {
+  const { outboxId } = req.params;
+  if (!mongoose.isValidObjectId(outboxId)) {
+    return res.status(400).json({ status: 'error', message: 'Invalid outbox id' });
+  }
+  const node = Number(req.body && req.body.node);
+  const doc = await MeshMessage.findOneAndUpdate(
+    { _id: outboxId, direction: 'downlink' },
+    { $set: { delivered: true, confirmed: true, confirmed_by: Number.isFinite(node) ? node : null, confirmed_at: new Date() } },
+    { new: true }
+  ).lean().catch(() => null);
+  if (!doc) return res.status(404).json({ status: 'error', message: 'Outbox message not found' });
+  console.log(`[LORA MESH DOWNLINK CONFIRMED]: Message ${outboxId} confirmed by node #${node}`);
+  const io = req.app.get('io');
+  if (io) io.emit('mesh_message_confirmed', { _id: outboxId, node: doc.confirmed_by });
+  res.json({ status: 'success' });
+});
+
+/**
+ * @route   GET /v1/devices/mesh/nodes
+ * @desc    Every radio on the LoRa mesh: registered devices (stations, walkies) plus walkies
+ *          seen in mesh traffic, with last seen, battery, signal, last location and SOS state.
+ */
+router.get('/mesh/nodes', authenticateUser, async (req, res) => {
+  try {
+    const since = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    const nodes = new Map(); // radio node -> info
+    const get = (id) => {
+      if (!nodes.has(id)) nodes.set(id, { node: id, name: WALKIE_NAMES[id] || null, role: id >= 100 ? 'walkie' : 'station', registered: false });
+      return nodes.get(id);
+    };
+
+    const devices = await Device.find({ org_id: req.org_id })
+      .select('device_id name location device_type node_id aliases latitude longitude status last_seen heard_by').lean();
+    for (const d of devices) {
+      const id = radioNodeOf(d);
+      if (!id) continue;
+      Object.assign(get(id), {
+        name: d.name,
+        device_id: d.device_id,
+        device_type: d.device_type,
+        role: d.device_type === 'weather_station_v1' ? 'station' : d.device_type === 'walkie_talkie_v1' ? 'walkie' : get(id).role,
+        location: d.location || '',
+        lat: d.latitude ?? null,
+        lon: d.longitude ?? null,
+        status: d.status,
+        last_seen: d.last_seen,
+        heard_by: d.heard_by || [],
+        registered: true,
+      });
+    }
+
+    // Latest uplink of each kind per origin node
+    const latest = await MeshMessage.aggregate([
+      { $match: { direction: 'uplink', timestamp: { $gte: since } } },
+      { $sort: { timestamp: -1 } },
+      { $group: {
+        _id: { node: '$origin_node', kind: '$kind' },
+        doc: { $first: '$$ROOT' },
+      } },
+    ]);
+    for (const { _id, doc } of latest) {
+      if (_id.node === 0) continue;
+      const n = get(_id.node);
+      const ts = doc.timestamp;
+      if (!n.last_heard || ts > n.last_heard) {
+        Object.assign(n, { last_heard: ts, battery_mv: doc.battery_mv, rssi: doc.rssi, snr: doc.snr, gateway_id: doc.gateway_id });
+      }
+      if (_id.kind === 'msg' || _id.kind === undefined) { n.last_text = doc.text; n.last_text_at = ts; }
+      if (doc.lat != null && (!n.loc_at || ts > n.loc_at)) Object.assign(n, { last_lat: doc.lat, last_lon: doc.lon, last_acc: doc.acc, loc_at: ts });
+      if (_id.kind === 'sos') n.sos_at = ts, n.sos_type = doc.sos_type;
+      if (_id.kind === 'sos_cancel') n.sos_cancel_at = ts;
+    }
+    for (const n of nodes.values()) {
+      n.sos_active = !!(n.sos_at && (!n.sos_cancel_at || n.sos_cancel_at < n.sos_at) && Date.now() - new Date(n.sos_at) < 3600 * 1000);
+    }
+
+    res.json({ status: 'success', nodes: [...nodes.values()].sort((a, b) => a.node - b.node) });
+  } catch (error) {
+    console.error('Mesh nodes error:', error);
+    res.status(500).json({ status: 'error', message: 'Failed to list mesh nodes' });
+  }
 });
 
 /**
@@ -2324,8 +2447,8 @@ router.get('/telemetry/history', authenticateUser, async (req, res) => {
       ]
     }).select('device_id name location node_id status last_seen aliases latitude longitude heard_by');
 
-    const stationsMeta = registeredStations.map(s => ({
-      nodeId: s.node_id || 1,
+    const stationsMeta = registeredStations.filter(s => radioNodeOf(s)).map(s => ({
+      nodeId: radioNodeOf(s), // what it transmits as (e.g. a station registered as 1003 sends 235)
       deviceId: s.device_id,
       name: s.name,
       location: s.location,
@@ -2335,7 +2458,7 @@ router.get('/telemetry/history', authenticateUser, async (req, res) => {
 
     const allNodeIds = Array.from(new Set([
       ...readingActiveNodes,
-      ...registeredStations.filter(s => s.node_id).map(s => s.node_id)
+      ...registeredStations.map(radioNodeOf).filter(Boolean)
     ])).sort((a, b) => a - b);
 
     res.json({
