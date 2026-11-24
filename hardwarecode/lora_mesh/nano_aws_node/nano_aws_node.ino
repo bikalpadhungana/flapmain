@@ -117,6 +117,10 @@ Adafruit_BMP085 bmp;
 MeshDedup dedupCache;
 bool bmpDetected = false;
 
+// ---- LoRa TxDone (DIO0 -> D2 interrupt, via LoRa.onTxDone) ----
+volatile bool txDoneFlag = false;
+void onLoraTxDone() { txDoneFlag = true; }
+
 // ---- ISR: Anemometer Pulse Counter ----
 // ICACHE_RAM_ATTR is ESP8266-only; AVR Nano needs plain void
 #if defined(ESP8266)
@@ -284,27 +288,49 @@ bool sendMeshPacket(uint8_t packetType, uint8_t alertLevel) {
   Serial.println(F(" tips)"));
   Serial.println(F("=============================================="));
 
-  // -- Transmit --
-  // Same blocking send as the older firmware that the gateway receives fine.
-  // (An async send + DIO0 wait never saw TxDone: arduino-LoRa only routes TxDone
-  // to DIO0 when an onTxDone callback is set, so every send waited 3 s.)
+  // -- Transmit (with a timeout) --
+  // A plain blocking endPacket() waits forever if the SX1278 browns out mid-send
+  // (it needs ~120 mA at 3.3 V; the Nano's 3V3 pin cannot supply that), which froze
+  // the station after one packet. Send async and wait for the TxDone interrupt
+  // (LoRa.onTxDone routes TxDone to DIO0 -> D2) for at most 3 s.
   unsigned long txStart = millis();
+  txDoneFlag = false;
   LoRa.beginPacket();
   LoRa.write((uint8_t *)&pkt, sizeof(pkt));
-  int res = LoRa.endPacket(); // blocks until the SX1278 reports TxDone
+  LoRa.endPacket(true);
+  while (!txDoneFlag && millis() - txStart < 3000) {
+    checkRainfallSensor();
+  }
   unsigned long txMs = millis() - txStart;
+  bool done = txDoneFlag;
 
-  if (res == 1) {
+  if (done) {
     Serial.print(F("✅ [AWS TX OK] Packet #"));
     Serial.print(msgId);
     Serial.print(F(" sent over 433MHz in "));
     Serial.print(txMs);
     Serial.println(F(" ms (expect ~650 ms at SF10)"));
   } else {
-    Serial.println(F("❌ [AWS TX FAIL] endPacket() returned 0!"));
+    Serial.println(F("❌ [AWS TX TIMEOUT] The SX1278 did not finish sending in 3 s."));
+    Serial.println(F("   1) Power: give the LoRa module its own 3.3 V regulator (AMS1117 from 5 V)"));
+    Serial.println(F("      + 100uF cap, not the Nano 3V3 pin; power the MQ-9 heater separately."));
+    Serial.println(F("   2) Wiring: DIO0 must go to D2. Restarting the radio..."));
+    LoRa.end();
+    delay(50);
+    if (LoRa.begin(LORA_FREQUENCY)) {
+      LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
+      LoRa.setSignalBandwidth(LORA_BANDWIDTH);
+      LoRa.setCodingRate4(LORA_CODING_RATE);
+      LoRa.setTxPower(LORA_TX_POWER);
+      LoRa.setSyncWord(LORA_SYNC_WORD);
+      LoRa.enableCrc();
+      LoRa.onTxDone(onLoraTxDone);
+    } else {
+      Serial.println(F("   Radio did not come back (check wiring / power)."));
+    }
   }
 
-  return (res == 1);
+  return done;
 }
 
 // ---- Setup ----
@@ -376,6 +402,7 @@ void setup() {
   LoRa.setTxPower(LORA_TX_POWER);                 // 14 dBm
   LoRa.setSyncWord(LORA_SYNC_WORD);               // 0x12
   LoRa.enableCrc(); // CRC MUST be enabled on both TX and RX!
+  LoRa.onTxDone(onLoraTxDone); // TxDone on DIO0 -> D2, used for the send timeout
 
 #if ENABLE_AWS_SOS_RELAY
   LoRa.receive(); // Enter continuous RX mode for relay
