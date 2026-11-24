@@ -616,7 +616,9 @@ void sendWalkieMessage(const char *text, uint8_t alertLevel, uint8_t pktType, ui
 
   char clean[32] = {0};
   uint8_t parsedTarget = parseTargetNodeFromText(text, clean, sizeof(clean));
-  if (target == 0) target = parsedTarget;
+  // "text /102" always goes to node 102, whatever target is selected on the walkie's menu
+  // (before, a non-zero menu target silently overrode the app's direct messages).
+  if (parsedTarget) target = parsedTarget;
 
   uint16_t id = nextMsgId();
   pkt.msgIdHi = id >> 8;
