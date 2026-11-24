@@ -27,6 +27,20 @@
 #if !defined(PKT_TYPE_ACK) || !defined(DEFAULT_MAX_TTL)
 #error "Wrong lora_mesh_protocol.h: use the one from the esp32_walkie_talkie_node folder"
 #endif
+#ifndef BLE_PAIRING
+#if defined(BLE_REQUIRE_PAIRING) && BLE_REQUIRE_PAIRING
+#define BLE_PAIRING 2
+#elif defined(BLE_REQUIRE_PAIRING)
+#define BLE_PAIRING 0
+#else
+#define BLE_PAIRING 1
+#endif
+#endif
+#ifndef BLE_PAIR_WINDOW_MS
+#define BLE_PAIR_WINDOW_MS 120000
+#endif
+#undef BLE_REQUIRE_PAIRING
+#define BLE_REQUIRE_PAIRING (BLE_PAIRING > 0)
 #include <Adafruit_GFX.h>
 #include <LoRa.h>
 #include <SPI.h>
@@ -49,10 +63,62 @@ static_assert(sizeof(LoRaMeshPacket) == 58, "Old lora_mesh_protocol.h (packet is
 // =================================================================================
 // OLED: framebuffer driver for SH1106 (1.3") and SSD1306 (0.96")
 // =================================================================================
+// Declared before any function: Arduino's generated prototypes use this type.
+struct ReceivedMessage {
+  uint8_t sender;
+  uint8_t target;
+  int16_t rssi;
+  uint8_t alertLevel;
+  unsigned long rxTime;
+  char text[32];
+};
+
+#ifndef OLED_RST_PIN
+#define OLED_RST_PIN -1
+#endif
+#ifndef OLED_DRIVER
+#define OLED_DRIVER 0
+#endif
+
+// I2C pins that answered (for messages and /i2c)
+int oledSda = OLED_SDA_PIN, oledScl = OLED_SCL_PIN;
+
+// True if `pin` is used by something else in config.h (never probe those as I2C).
+bool pinInUse(int pin) {
+  const int used[] = {LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN,
+                      BTN_SELECT_PIN, BTN_CLICK_PIN, BUZZER_PIN, STATUS_LED_PIN, BATT_PIN};
+  for (int u : used) if (u == pin) return true;
+  return false;
+}
+
+// Print every I2C address that answers on the given pins.
+void i2cScan(int sda, int scl) {
+  Wire.end();
+  Wire.begin(sda, scl, 100000);
+  Serial.printf("[I2C] Scan SDA=%d SCL=%d:", sda, scl);
+  uint8_t n = 0;
+  for (uint8_t a = 1; a < 127; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) { Serial.printf(" 0x%02X", a); n++; }
+  }
+  Serial.println(n ? "" : " nothing found (check wiring, power, SDA/SCL)");
+}
+
 class UniversalOLED : public Adafruit_GFX {
   uint8_t addr = 0x3C;
   uint8_t colOffset = 2; // SH1106 RAM is 132 wide; SSD1306 ignores the offset visually
   uint8_t buf[1024];
+
+  // Look for a display at 0x3C / 0x3D on one pin pair (at 100 kHz: works with long jumpers).
+  bool probe(int sda, int scl) {
+    Wire.end();
+    Wire.begin(sda, scl, 100000);
+    for (uint8_t a : {(uint8_t)0x3C, (uint8_t)0x3D}) {
+      Wire.beginTransmission(a);
+      if (Wire.endTransmission() == 0) { addr = a; oledSda = sda; oledScl = scl; return true; }
+    }
+    return false;
+  }
 
   void cmd(uint8_t c) {
     Wire.beginTransmission(addr);
@@ -73,20 +139,56 @@ public:
   void clear() { memset(buf, 0, sizeof(buf)); }
 
   bool begin() {
-    Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
-    Wire.setClock(400000);
-    for (uint8_t a : {(uint8_t)0x3C, (uint8_t)0x3D}) {
-      Wire.beginTransmission(a);
-      if (Wire.endTransmission() == 0) { addr = a; goto found; }
+    if (OLED_RST_PIN >= 0) { // built-in OLEDs on TTGO / Heltec boards stay dark until reset
+      pinMode(OLED_RST_PIN, OUTPUT);
+      digitalWrite(OLED_RST_PIN, LOW);
+      delay(20);
+      digitalWrite(OLED_RST_PIN, HIGH);
+      delay(20);
     }
-    return false;
-  found:
-    static const uint8_t init[] = {0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40, 0x8D, 0x14,
-                                   0xAD, 0x8B, 0x30, 0xA1, 0xC8, 0xDA, 0x12, 0x81, 0xBF, 0xD9,
-                                   0x22, 0xDB, 0x40, 0xA4, 0xA6, 0xAF};
-    for (uint8_t c : init) cmd(c);
+
+    // Configured pins first, then the same pins swapped, then common built-in OLED pins.
+    const int pairs[][2] = {{OLED_SDA_PIN, OLED_SCL_PIN}, {OLED_SCL_PIN, OLED_SDA_PIN}, {21, 22}, {22, 21},
+                            {4, 15}, {15, 4}, {17, 18}, {18, 17}};
+    bool found = false;
+    for (uint8_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]) && !found; i++) {
+      int sda = pairs[i][0], scl = pairs[i][1];
+      if (i >= 2 && (pinInUse(sda) || pinInUse(scl))) continue; // never disturb LoRa / buttons
+      found = probe(sda, scl);
+    }
+    if (!found) {
+      Serial.printf("[OLED] No display at 0x3C/0x3D. Expected SDA=%d SCL=%d, VCC=3.3V, GND.\n", OLED_SDA_PIN, OLED_SCL_PIN);
+      i2cScan(OLED_SDA_PIN, OLED_SCL_PIN);
+      return false;
+    }
+
+    // Faster bus for drawing, if the wiring allows it.
+    Wire.setClock(400000);
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() != 0) Wire.setClock(100000);
+
+    if (OLED_DRIVER == 1) {        // SSD1306 0.96"
+      colOffset = 0;
+      static const uint8_t init[] = {0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40, 0x8D, 0x14, 0x20, 0x02,
+                                     0xA1, 0xC8, 0xDA, 0x12, 0x81, 0xCF, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF};
+      for (uint8_t c : init) cmd(c);
+    } else if (OLED_DRIVER == 2) { // SH1106 1.3"
+      colOffset = 2;
+      static const uint8_t init[] = {0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40, 0xAD, 0x8B, 0x32,
+                                     0xA1, 0xC8, 0xDA, 0x12, 0x81, 0x80, 0xD9, 0x22, 0xDB, 0x35, 0xA4, 0xA6, 0xAF};
+      for (uint8_t c : init) cmd(c);
+    } else {                       // both: charge pump commands for SSD1306 and SH1106
+      static const uint8_t init[] = {0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40, 0x8D, 0x14,
+                                     0xAD, 0x8B, 0x30, 0xA1, 0xC8, 0xDA, 0x12, 0x81, 0xBF, 0xD9,
+                                     0x22, 0xDB, 0x40, 0xA4, 0xA6, 0xAF};
+      for (uint8_t c : init) cmd(c);
+    }
     clear();
     show();
+    if (oledSda != OLED_SDA_PIN || oledScl != OLED_SCL_PIN)
+      Serial.printf("[OLED] Found on SDA=%d SCL=%d, not the configured %d/%d: set OLED_SDA_PIN/OLED_SCL_PIN in config.h\n",
+                    oledSda, oledScl, OLED_SDA_PIN, OLED_SCL_PIN);
+    Serial.printf("[OLED] Display at 0x%02X on SDA=%d SCL=%d\n", addr, oledSda, oledScl);
     return true;
   }
 
@@ -122,7 +224,12 @@ volatile bool bleJustConnected = false; // send READY once the link is usable
 volatile bool bleSecure = false;        // link encrypted (or pairing disabled): only then send data
 volatile bool bleAuthFailed = false;
 volatile uint16_t bleConnId = 0;
-bool appMode = false; // set once the app speaks its protocol (PING / LORA:...): debug lines stay on USB
+uint8_t bleRemoteBda[6] = {0};
+volatile unsigned long bleConnectedAt = 0;
+volatile bool bleSecRequested = false;
+unsigned long pairWindowUntil = BLE_PAIR_WINDOW_MS; // new phones may pair until this millis()
+volatile bool pairRejectedLocked = false;          // last pairing refused because the window was closed
+bool appMode = true; // debug log lines go to USB only; "/debug on" also sends them over Bluetooth
 volatile uint32_t blePasskey = 0; // set while a phone is pairing (shown on OLED)
 
 #if BLE_ENABLED
@@ -144,9 +251,13 @@ class DualConsole : public Print {
     if (bleConnected && bleSecure && (alwaysBle || !appMode) && bleTx && len) {
       uint16_t mtu = BLEDevice::getMTU();
       size_t chunk = (mtu > 23 ? mtu - 3 : 20);
-      for (size_t off = 0; off < len; off += chunk) {
+      for (size_t off = 0; off < len;) {
         size_t n = min(chunk, len - off);
+        // Never end a notification inside a multi-byte UTF-8 character (e.g. Nepali text):
+        // apps decode each notification on its own.
+        while (n > 1 && off + n < len && (line[off + n] & 0xC0) == 0x80) n--;
         bleTx->setValue((uint8_t *)line + off, n);
+        off += n;
         bleTx->notify();
         delay(4); // let the stack drain between notifications
       }
@@ -178,14 +289,6 @@ uint8_t myNodeId = WALKIE_NODE_ID;
 MeshDedup dedupCache;
 uint16_t msgCounter = 0;
 
-struct ReceivedMessage {
-  uint8_t sender;
-  uint8_t target;
-  int16_t rssi;
-  uint8_t alertLevel;
-  unsigned long rxTime;
-  char text[32];
-};
 ReceivedMessage inbox[INBOX_CAPACITY];
 uint8_t inboxCount = 0;
 uint8_t inboxIdx = 0;
@@ -223,10 +326,22 @@ uint8_t menuIdx = 0, presetIdx = 0, targetSelIdx = 0;
 char splash1[22] = "", splash2[22] = "";
 unsigned long splashUntil = 0;
 bool needRedraw = true;
+bool loraOk = false;              // SX1278 answered at init; retried every 10 s if not
+unsigned long loraRetryAt = 0;
 
 // =================================================================================
 // Helpers
 // =================================================================================
+int bondedPhoneCount() {
+#if BLE_ENABLED && defined(CONFIG_BLUEDROID_ENABLED)
+  return esp_ble_get_bond_device_num();
+#else
+  return 0;
+#endif
+}
+// New phones may pair while the window is open, or at any time if no phone is paired yet.
+bool pairWindowOpen() { return (long)(pairWindowUntil - millis()) > 0 || bondedPhoneCount() <= 0; }
+
 void beep(uint16_t freq, uint16_t ms) {
 #if BUZZER_PIN > 0
   tone(BUZZER_PIN, freq, ms);
@@ -359,7 +474,7 @@ void drawScreen() {
         messageMeta(2, lastRx, lastRxDirect, sos);
         wrapped(3, 3, lastRx.text[0] ? lastRx.text : "SOS TRIGGERED!");
       } else {
-        row(2, "Listening 433MHz");
+        row(2, loraOk ? "Listening 433MHz" : "LORA NOT FOUND", !loraOk);
         nodeName(TARGETS[targetIdx], name, sizeof(name));
         snprintf(line, sizeof(line), "To: %s", TARGETS[targetIdx] == 0 ? "ALL" : name);
         row(3, line);
@@ -373,7 +488,9 @@ void drawScreen() {
           default: line[0] = '\0';
         }
         row(4, line, lastSendStatus == SEND_FAILED);
-        if (unreadCount) snprintf(line, sizeof(line), "Inbox: %u unread", unreadCount);
+        if (BLE_ENABLED && BLE_PAIRING > 0 && pairWindowOpen() && !bleConnected)
+          snprintf(line, sizeof(line), "BT pairing open %lus", (pairWindowUntil - millis()) / 1000);
+        else if (unreadCount) snprintf(line, sizeof(line), "Inbox: %u unread", unreadCount);
         else snprintf(line, sizeof(line), "Hold [C] = SOS");
         row(5, line);
       }
@@ -459,6 +576,7 @@ void drawScreen() {
 // Radio
 // =================================================================================
 bool transmitPacket(const LoRaMeshPacket &pkt) {
+  if (!loraOk) return false;
   digitalWrite(STATUS_LED_PIN, HIGH);
   LoRa.beginPacket();
   LoRa.write((const uint8_t *)&pkt, sizeof(pkt));
@@ -491,6 +609,17 @@ void sendWalkieMessage(const char *text, uint8_t alertLevel, uint8_t pktType, ui
   pkt.alert_level = alertLevel;
   pkt.battery_mv = readBatteryMv();
   strncpy(pkt.text_msg, clean[0] ? clean : text, sizeof(pkt.text_msg) - 1);
+  // The packet holds 31 bytes; don't leave half of a multi-byte UTF-8 character at the end.
+  size_t tl = strlen(pkt.text_msg);
+  if (tl == sizeof(pkt.text_msg) - 1) {
+    size_t cut = tl;
+    while (cut > 0 && (pkt.text_msg[cut - 1] & 0xC0) == 0x80) cut--;       // back to the lead byte
+    if (cut > 0) {
+      uint8_t lead = (uint8_t)pkt.text_msg[cut - 1];
+      size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+      if (tl - (cut - 1) < need) pkt.text_msg[cut - 1] = '\0';           // incomplete: drop it
+    }
+  }
 
   dedupCache.markSeen(myNodeId, id);
   bool ok = transmitPacket(pkt);
@@ -507,6 +636,7 @@ void sendWalkieMessage(const char *text, uint8_t alertLevel, uint8_t pktType, ui
       lastSendStatus = SEND_BROADCAST;
     }
   }
+  if (!loraOk) Console.println("ERR:LoRa radio not detected (check SX1278 wiring and power)");
   Log.printf("%s MsgID #%u to #%u%s: \"%s\"\n", ok ? "🚀 [TX]" : "❌ [TX FAIL]", id, target,
                 target ? " (waiting for ACK)" : " (broadcast)", pkt.text_msg);
   needRedraw = true;
@@ -656,17 +786,34 @@ enum ButtonEvent : uint8_t { BTN_NONE, BTN_SHORT, BTN_LONG };
 
 struct Button {
   uint8_t pin;
+  uint16_t longMs = 1500;
   bool last = HIGH, pressed = false, longFired = false;
+  bool stuck = false; // read LOW at power-on: ignored until released (prevents false SOS)
   unsigned long since = 0;
 
-  void begin(uint8_t p) { pin = p; pinMode(pin, INPUT_PULLUP); }
+  void begin(uint8_t p, uint16_t longPressMs = 1500, const char *name = "button") {
+    pin = p;
+    longMs = longPressMs;
+    pinMode(pin, INPUT_PULLUP);
+    delay(5);
+    stuck = digitalRead(pin) == LOW;
+    last = stuck ? LOW : HIGH;
+    if (stuck)
+      Serial.printf("⚠️ [BUTTON] %s (GPIO%u) reads pressed at power-on: ignored until released. "
+                    "Check it is wired between the pin and GND.\n", name, pin);
+  }
 
   ButtonEvent update() {
     bool raw = digitalRead(pin);
+    if (stuck) {
+      if (raw == HIGH) stuck = false; // released once: normal from now on
+      last = raw;
+      return BTN_NONE;
+    }
     unsigned long now = millis();
     ButtonEvent e = BTN_NONE;
     if (raw == LOW && last == HIGH) { pressed = true; longFired = false; since = now; }
-    else if (raw == LOW && pressed && !longFired && now - since >= 1500) { longFired = true; e = BTN_LONG; }
+    else if (raw == LOW && pressed && !longFired && now - since >= longMs) { longFired = true; e = BTN_LONG; }
     else if (raw == HIGH && last == LOW && pressed) {
       if (!longFired && now - since >= 35) e = BTN_SHORT;
       pressed = false;
@@ -740,6 +887,11 @@ void printHelp() {
   Console.println(" /inbox          list received messages");
   Console.println(" /ping           heartbeat to target");
   Console.println(" /status         one-line status (for apps)");
+  Console.println(" /pair           allow a new phone to pair (also: hold SELECT 3 s)");
+  Console.println(" /unpair         forget all paired phones");
+  Console.println(" /ble            Bluetooth + radio state (for troubleshooting)");
+  Console.println(" /i2c            scan the display's I2C bus");
+  Console.println(" /debug on|off   also send the debug log over Bluetooth");
   Console.println(" s / c           simulate SELECT / CLICK");
   Console.println(" App protocol: PING | LORA:MSG <text> | LORA:LOC lat,lon,acc");
   Console.println("               LORA:SOS <TYPE> [lat,lon,acc] | LORA:SOS CANCEL");
@@ -770,6 +922,27 @@ bool formatFix(const char *in, char *out, size_t n, uint8_t decimals) {
 void sendSosPacket() {
   sendWalkieMessage(sosText, 2, PKT_TYPE_SOS, 0);
   sosNextAt = millis() + SOS_REPEAT_MS;
+}
+
+void openPairingWindow() {
+  pairWindowUntil = millis() + BLE_PAIR_WINDOW_MS;
+  Log.printf("[BLE] Pairing window open for %lus\n", (unsigned long)(BLE_PAIR_WINDOW_MS / 1000));
+  beep(2400, 60); delay(80); beep(2400, 60);
+  splash("BT PAIRING OPEN", "Pair from the app", 2500);
+}
+
+// Forget every paired phone (they must pair again during a pairing window).
+void forgetBondedPhones() {
+#if BLE_ENABLED && defined(CONFIG_BLUEDROID_ENABLED)
+  int n = esp_ble_get_bond_device_num();
+  if (n > 0) {
+    esp_ble_bond_dev_t *list = (esp_ble_bond_dev_t *)malloc(sizeof(esp_ble_bond_dev_t) * n);
+    if (list && esp_ble_get_bond_device_list(&n, list) == ESP_OK)
+      for (int i = 0; i < n; i++) esp_ble_remove_bond_device(list[i].bd_addr);
+    free(list);
+  }
+  Log.printf("[BLE] Forgot %d paired phone(s)\n", n < 0 ? 0 : n);
+#endif
 }
 
 bool handleAppCommand(char *s) {
@@ -872,6 +1045,20 @@ void emitAppRx(const LoRaMeshPacket &pkt, int rssi) {
 void handleSerialLine(char *s) {
   if (handleAppCommand(s)) return;
   if (!strcasecmp(s, "/help")) printHelp();
+  else if (!strcasecmp(s, "/pair")) openPairingWindow();
+  else if (!strcasecmp(s, "/debug on")) { appMode = false; Console.println("OK:Debug log on Bluetooth"); }
+  else if (!strcasecmp(s, "/debug off")) { appMode = true; Console.println("OK:Debug log USB only"); }
+  else if (!strcasecmp(s, "/i2c")) {
+    i2cScan(oledSda, oledScl);
+    if (oledPresent) { Wire.end(); Wire.begin(oledSda, oledScl, 400000); needRedraw = true; }
+  }
+  else if (!strcasecmp(s, "/ble")) {
+    long left = (long)(pairWindowUntil - millis());
+    Console.printf("BLE enabled=%d mode=%d connected=%d secure=%d paired_phones=%d new_phone_allowed=%d window_s=%ld lora=%d\n",
+                   BLE_ENABLED, BLE_PAIRING, bleConnected ? 1 : 0, bleSecure ? 1 : 0, bondedPhoneCount(),
+                   pairWindowOpen() ? 1 : 0, left > 0 ? left / 1000 : 0, loraOk ? 1 : 0);
+  }
+  else if (!strcasecmp(s, "/unpair")) forgetBondedPhones();
   else if (!strcasecmp(s, "s")) onSelect();
   else if (!strcasecmp(s, "c")) onClick();
   else if (!strncasecmp(s, "/id ", 4)) {
@@ -893,9 +1080,9 @@ void handleSerialLine(char *s) {
     if (!inboxCount) Log.println(" (empty)");
   } else if (!strcasecmp(s, "/status")) {
     static const char *st[] = {"none", "sending", "delivered", "failed", "broadcast", "reached_base"};
-    Console.printf("STATUS node=%u batt=%u unread=%u inbox=%u target=%u last=%s last_to=%u ble=%u\n", myNodeId,
+    Console.printf("STATUS node=%u batt=%u unread=%u inbox=%u target=%u last=%s last_to=%u ble=%u lora=%u\n", myNodeId,
                    readBatteryMv(), unreadCount, inboxCount, TARGETS[targetIdx], st[lastSendStatus], lastSendTarget,
-                   bleConnected ? 1 : 0);
+                   bleConnected ? 1 : 0, loraOk ? 1 : 0);
   } else if (!strcasecmp(s, "/ping")) sendWalkieMessage("PING HEARTBEAT", 0, PKT_TYPE_HEARTBEAT, TARGETS[targetIdx]);
   else if (!strncasecmp(s, "/sos", 4)) {
     char *t = s + 4;
@@ -927,6 +1114,7 @@ LineInput serialIn, bleIn;
 
 void pollSerial() {
   while (Serial.available()) serialIn.feed((char)Serial.read());
+  serialIn.idleFlush(700); // Serial Monitor set to "No line ending" still works
 #if BLE_ENABLED
   char c;
   while (bleInQueue && xQueueReceive(bleInQueue, &c, 0) == pdTRUE) bleIn.feed(c);
@@ -942,16 +1130,22 @@ class ServerCallbacks : public BLEServerCallbacks {
     bleJustConnected = bleSecure;
   }
 #if BLE_REQUIRE_PAIRING && defined(CONFIG_BLUEDROID_ENABLED)
-  // Start pairing (or re-encryption for a bonded phone) immediately, before the app's first write.
+  // Pairing is normally started by the phone: its first write needs encryption, and Android then
+  // pairs on its own. If the link is still not secure after 3 s, loop() asks the phone to pair.
   void onConnect(BLEServer *, esp_ble_gatts_cb_param_t *param) override {
     bleConnId = param->connect.conn_id;
-    esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+    memcpy(bleRemoteBda, param->connect.remote_bda, 6);
+    bleConnectedAt = millis();
+    bleSecRequested = false;
+    const uint8_t *a = param->connect.remote_bda;
+    Serial.printf("[BLE] Phone connected %02X:%02X:%02X:%02X:%02X:%02X; waiting for it to pair\n", a[0], a[1], a[2], a[3], a[4], a[5]);
   }
 #endif
   void onDisconnect(BLEServer *) override {
+    Serial.println("[BLE] Phone disconnected; advertising again");
     bleConnected = false;
     bleSecure = false;
-    appMode = false;
+    appMode = true;
     blePasskey = 0;
     BLEDevice::startAdvertising(); // allow the next phone to connect
   }
@@ -970,13 +1164,33 @@ class RxCallbacks : public BLECharacteristicCallbacks {
 class PairingCallbacks : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override { return 0; } // we display the code, never type one
   void onPassKeyNotify(uint32_t key) override { blePasskey = key; }
-  bool onSecurityRequest() override { return true; }
+  bool onSecurityRequest() override {
+    bool ok = pairWindowOpen();
+    if (!ok) pairRejectedLocked = true;
+    return ok;
+  }
   bool onConfirmPIN(uint32_t) override { return false; } // numeric comparison not used
 #if defined(CONFIG_BLUEDROID_ENABLED)
   void onAuthenticationComplete(esp_ble_auth_cmpl_t r) override {
     blePasskey = 0;
-    if (r.success) { bleSecure = true; bleJustConnected = true; }
-    else bleAuthFailed = true;
+    if (r.success) {
+      bleSecure = true;
+      bleJustConnected = true;
+      Serial.println("[BLE] Link secured (paired / encrypted)");
+    } else {
+      // Forget our side of a stale pairing so the next attempt starts fresh.
+      esp_ble_remove_bond_device(r.bd_addr);
+      const char *why;
+      switch (r.fail_reason) {
+        case 0x63: why = "the phone did not answer: tap Pair on the phone's dialog or notification"; break;
+        case 0x50: case 0x52: why = "the phone refused or does not support this pairing mode"; break;
+        case 0x55: case 0x61: why = "stale pairing: remove FlapWalkie in the phone's Bluetooth settings"; break;
+        case 0x56: why = "too many attempts: wait a minute, then try again"; break;
+        default: why = "remove FlapWalkie in the phone's Bluetooth settings and try again"; break;
+      }
+      Serial.printf("[BLE] Pairing failed (reason 0x%02X): %s\n", r.fail_reason, why);
+      bleAuthFailed = true;
+    }
   }
 #endif
 #if defined(CONFIG_NIMBLE_ENABLED)
@@ -995,14 +1209,18 @@ void setupBle() {
   // Written to compile on ESP32 Arduino core 2.0.x and 3.x.
   BLEDevice::setSecurityCallbacks(new PairingCallbacks());
   BLESecurity *sec = new BLESecurity();
+#if BLE_PAIRING == 2
   sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND); // bond, MITM protection, secure connections
   sec->setCapability(ESP_IO_CAP_OUT);                       // we show the code; the phone types it
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  BLESecurity::setPassKey(false); // core 3.x would otherwise use the fixed passkey 123456
+#endif
+#else
+  sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND); // bond + secure connections, no PIN ("Just Works")
+  sec->setCapability(ESP_IO_CAP_NONE);
+#endif
   sec->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
   sec->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  // Core 3.x otherwise uses the fixed passkey 123456; core 2.x is random by default.
-  BLESecurity::setPassKey(false);
-#endif
 #endif
 
   bleServer = BLEDevice::createServer();
@@ -1021,7 +1239,7 @@ void setupBle() {
   // Only a paired (encrypted, MITM-protected) phone may send. Subscribing is allowed before
   // pairing so apps that enable notifications right after connecting keep working; nothing is
   // notified until the link is encrypted (see DualConsole / bleSecure).
-  rx->setAccessPermissions(ESP_GATT_PERM_WRITE_ENC_MITM);
+  rx->setAccessPermissions(BLE_PAIRING == 2 ? ESP_GATT_PERM_WRITE_ENC_MITM : ESP_GATT_PERM_WRITE_ENCRYPTED);
   (void)cccd;
 #endif
 
@@ -1030,9 +1248,36 @@ void setupBle() {
   adv->addServiceUUID(NUS_SERVICE_UUID);
   adv->setScanResponse(true);
   BLEDevice::startAdvertising();
-  Log.printf("[BLE] Advertising as \"%s\" (Nordic UART, pairing %s)\n", name, BLE_REQUIRE_PAIRING ? "required" : "OFF");
+  static const char *modes[] = {"OFF (open)", "Just Works (no PIN)", "passkey on OLED"};
+  Log.printf("[BLE] Advertising as \"%s\" (Nordic UART, pairing: %s; new phones for %lus or after holding SELECT 3s)\n",
+             name, modes[BLE_PAIRING], (unsigned long)(BLE_PAIR_WINDOW_MS / 1000));
 }
 #endif
+
+// =================================================================================
+// LoRa radio start (retried from loop() until the SX1278 answers)
+// =================================================================================
+bool initLora() {
+  if (!LoRa.begin(LORA_FREQUENCY)) {
+    loraOk = false;
+    loraRetryAt = millis() + 10000;
+    Log.printf("❌ [LORA] SX1278 not found. Check: VCC=3.3V GND SCK=%d MISO=%d MOSI=%d CS=%d RST=%d DIO0=%d. Retrying in 10 s\n",
+               LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
+    needRedraw = true;
+    return false;
+  }
+  LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
+  LoRa.setSignalBandwidth(LORA_BANDWIDTH);
+  LoRa.setCodingRate4(LORA_CODING_RATE);
+  LoRa.setTxPower(LORA_TX_POWER);
+  LoRa.setSyncWord(LORA_SYNC_WORD);
+  LoRa.enableCrc();
+  LoRa.receive();
+  loraOk = true;
+  Log.printf("✅ [LORA] SX1278 online: %.0f MHz SF%d sync 0x%02X\n", LORA_FREQUENCY / 1e6, LORA_SPREADING_FACTOR, LORA_SYNC_WORD);
+  needRedraw = true;
+  return true;
+}
 
 // =================================================================================
 // Setup / loop
@@ -1040,10 +1285,11 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
+  Serial.printf("\n[BOOT] FlapMain ESP32 walkie #%u starting (type /help, Serial Monitor at 115200)\n", WALKIE_NODE_ID);
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
-  btnSelect.begin(BTN_SELECT_PIN);
-  btnClick.begin(BTN_CLICK_PIN);
+  btnSelect.begin(BTN_SELECT_PIN, 3000, "SELECT"); // hold 3 s: open the Bluetooth pairing window
+  btnClick.begin(BTN_CLICK_PIN, 1500, "CLICK");     // hold 1.5 s: SOS
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
 
@@ -1065,19 +1311,7 @@ void setup() {
   LoRa.setSPI(SPI);
   LoRa.setPins(LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
   LoRa.setSPIFrequency(4000000);
-  if (!LoRa.begin(LORA_FREQUENCY)) {
-    Log.printf("ERROR: SX1278 init FAILED. Wiring: SCK=%d MISO=%d MOSI=%d CS=%d RST=%d DIO0=%d, VCC=3.3V\n",
-                  LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
-    if (oledPresent) { display.clear(); row(3, "LORA INIT FAILED", true); display.show(); }
-    while (true) delay(500);
-  }
-  LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
-  LoRa.setSignalBandwidth(LORA_BANDWIDTH);
-  LoRa.setCodingRate4(LORA_CODING_RATE);
-  LoRa.setTxPower(LORA_TX_POWER);
-  LoRa.setSyncWord(LORA_SYNC_WORD);
-  LoRa.enableCrc();
-  LoRa.receive();
+  initLora(); // a missing radio no longer stops the walkie: serial + Bluetooth keep working
 
 #if BLE_ENABLED
   setupBle();
@@ -1089,15 +1323,20 @@ void setup() {
 }
 
 void loop() {
-  int size = LoRa.parsePacket();
-  if (size > 0) {
-    processIncomingPacket(size);
-    LoRa.receive();
+  if (loraOk) {
+    int size = LoRa.parsePacket();
+    if (size > 0) {
+      processIncomingPacket(size);
+      LoRa.receive();
+    }
+  } else if ((long)(millis() - loraRetryAt) >= 0) {
+    initLora();
   }
 
   ButtonEvent s = btnSelect.update();
   ButtonEvent c = btnClick.update();
   if (s == BTN_SHORT) onSelect();
+  if (s == BTN_LONG) openPairingWindow();
   if (c == BTN_SHORT) onClick();
   if (c == BTN_LONG) { Log.println("🚨 [BUTTON] long press -> SOS"); triggerSos(); }
 
@@ -1126,12 +1365,24 @@ void loop() {
 #if BLE_ENABLED
   if (bleAuthFailed) {
     bleAuthFailed = false;
-    Serial.println("[BLE] Pairing failed or was rejected; disconnecting");
+    Serial.println(pairRejectedLocked ? "[BLE] New phone refused: pairing window closed (hold SELECT 3 s)"
+                                      : "[BLE] Pairing failed or was rejected; disconnecting");
     if (bleServer) bleServer->disconnect(bleConnId);
-    splash("PAIRING FAILED", "Try again", 2500);
+    if (pairRejectedLocked) splash("PAIRING LOCKED", "Hold SELECT 3s", 3000);
+    else splash("PAIRING FAILED", "Try again", 2500);
+    pairRejectedLocked = false;
   }
 #endif
   serviceSos();
+
+#if BLE_ENABLED && BLE_PAIRING > 0 && defined(CONFIG_BLUEDROID_ENABLED)
+  // Phone connected but has not paired after 3 s: ask it to (Android shows "Pair with FlapWalkie?").
+  if (bleConnected && !bleSecure && !bleSecRequested && millis() - bleConnectedAt > 3000) {
+    bleSecRequested = true;
+    Serial.println("[BLE] Asking the phone to pair: tap Pair on the phone");
+    esp_ble_set_encryption(bleRemoteBda, BLE_PAIRING == 2 ? ESP_BLE_SEC_ENCRYPT_MITM : ESP_BLE_SEC_ENCRYPT);
+  }
+#endif
 
   if (screen == SCR_SPLASH && (long)(millis() - splashUntil) >= 0) { screen = SCR_HOME; needRedraw = true; }
 
