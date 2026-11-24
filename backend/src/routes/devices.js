@@ -1877,7 +1877,7 @@ const toClientMessage = (m) => ({
 });
 
 const recentMeshMessages = async (limit = 100) => {
-  const docs = await MeshMessage.find().sort({ timestamp: -1 }).limit(limit).lean();
+  const docs = await MeshMessage.find({ kind: { $ne: 'control' } }).sort({ timestamp: -1 }).limit(limit).lean();
   return docs.reverse().map(toClientMessage);
 };
 

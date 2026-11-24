@@ -96,6 +96,26 @@ const DeviceSchema = new mongoose.Schema(
       ],
       default: [],
     },
+    // Firmware the device reported on its last OTA check-in
+    firmware: {
+      board: { type: String, default: '' },
+      version: { type: String, default: '' },
+      chip: { type: String, default: '' },
+      reported_at: { type: Date, default: null },
+    },
+    // Over-the-air update requested from the dashboard
+    ota: {
+      target: { type: mongoose.Schema.Types.ObjectId, ref: 'Firmware', default: null },
+      target_version: { type: String, default: '' },
+      state: {
+        type: String,
+        enum: ['idle', 'pending', 'downloading', 'success', 'failed'],
+        default: 'idle',
+      },
+      message: { type: String, default: '' },
+      attempts: { type: Number, default: 0 },
+      updated_at: { type: Date, default: null },
+    },
   },
   {
     timestamps: true,

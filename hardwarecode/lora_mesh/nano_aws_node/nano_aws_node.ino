@@ -284,59 +284,27 @@ bool sendMeshPacket(uint8_t packetType, uint8_t alertLevel) {
   Serial.println(F(" tips)"));
   Serial.println(F("=============================================="));
 
-  // -- Transmit (with a timeout) --
-  // A blocking endPacket() waits forever if the SX1278 browns out mid-send
-  // (e.g. a 3.3 V pin that cannot supply its ~120 mA TX current). Send
-  // asynchronously and wait for TxDone on DIO0 instead, at most 3 s.
+  // -- Transmit --
+  // Same blocking send as the older firmware that the gateway receives fine.
+  // (An async send + DIO0 wait never saw TxDone: arduino-LoRa only routes TxDone
+  // to DIO0 when an onTxDone callback is set, so every send waited 3 s.)
   unsigned long txStart = millis();
   LoRa.beginPacket();
   LoRa.write((uint8_t *)&pkt, sizeof(pkt));
-  LoRa.endPacket(true);
-  bool done = false;
-  while (millis() - txStart < 3000) {
-    if (digitalRead(LORA_DIO0_PIN) == HIGH) { done = true; break; }
-    checkRainfallSensor();
-  }
+  int res = LoRa.endPacket(); // blocks until the SX1278 reports TxDone
   unsigned long txMs = millis() - txStart;
 
-  // DIO0 not wired? beginPacket() returns 1 only when the radio has left TX mode,
-  // i.e. the packet did go out; the DIO0 signal just never reached D2.
-  static bool dio0Warned = false;
-  if (!done && LoRa.beginPacket() == 1) {
-    LoRa.idle(); // discard the empty packet we just opened
-    done = true;
-    if (!dio0Warned) {
-      Serial.println(F("⚠️ [LoRa] Packet sent, but DIO0 -> D2 is not connected (TX time unknown)."));
-      dio0Warned = true;
-    }
-  }
-
-  if (done) {
+  if (res == 1) {
     Serial.print(F("✅ [AWS TX OK] Packet #"));
     Serial.print(msgId);
     Serial.print(F(" sent over 433MHz in "));
     Serial.print(txMs);
     Serial.println(F(" ms (expect ~650 ms at SF10)"));
   } else {
-    Serial.println(F("❌ [AWS TX TIMEOUT] SX1278 never finished sending."));
-    Serial.println(F("   Most likely power: the module needs ~120 mA at 3.3 V while sending."));
-    Serial.println(F("   Feed it from a separate 3.3 V regulator (AMS1117 from 5 V) + 100uF cap,"));
-    Serial.println(F("   not the Nano's 3.3V pin. Restarting the radio..."));
-    LoRa.end();
-    delay(50);
-    if (LoRa.begin(LORA_FREQUENCY)) {
-      LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
-      LoRa.setSignalBandwidth(LORA_BANDWIDTH);
-      LoRa.setCodingRate4(LORA_CODING_RATE);
-      LoRa.setTxPower(LORA_TX_POWER);
-      LoRa.setSyncWord(LORA_SYNC_WORD);
-      LoRa.enableCrc();
-    } else {
-      Serial.println(F("   Radio did not come back (check wiring / power)."));
-    }
+    Serial.println(F("❌ [AWS TX FAIL] endPacket() returned 0!"));
   }
 
-  return done;
+  return (res == 1);
 }
 
 // ---- Setup ----
@@ -390,7 +358,6 @@ void setup() {
   }
 
   // --- LoRa SX1278 ---
-  pinMode(LORA_DIO0_PIN, INPUT); // TxDone is read from DIO0 (see sendMeshPacket)
   LoRa.setPins(LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
   LoRa.setSPIFrequency(4000000); // 4MHz SPI (stable for jumper wires)
 
@@ -427,9 +394,16 @@ void setup() {
       F("[AWS Ready] Pure AWS Mode: Broadcasting telemetry every 5s.\n"));
 #endif
 
-  // Seed random for msg counter
-  randomSeed(analogRead(A1) ^ millis());
-  msgSequenceCounter = (uint16_t)random(100, 1000);
+  // Seed random for the message counter from the noisy low bits of several
+  // analog reads. (analogRead(A1) ^ millis() repeated after every reboot, so the
+  // gateway dropped the first packets as duplicates of the previous run.)
+  uint32_t seed = micros();
+  for (uint8_t i = 0; i < 32; i++) {
+    seed = (seed << 1) ^ (analogRead(A0 + (i % 4)) & 1) ^ (seed >> 31);
+    delayMicroseconds(37);
+  }
+  randomSeed(seed ^ micros());
+  msgSequenceCounter = (uint16_t)random(1, 65000);
 
   // Stagger initial transmission phase based on Node ID to prevent simultaneous
   // airtime collisions: Node 1: offset 0ms Node 2: offset 1200ms Node 3: offset

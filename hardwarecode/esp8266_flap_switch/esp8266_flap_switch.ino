@@ -11,6 +11,14 @@
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
 #include "config.h"
+// ---- Firmware version & OTA updates from the dashboard (Firmware page) ----
+// Bump FLAP_FW_VERSION for every build you upload, or the device sees no update.
+#ifndef FLAP_FW_VERSION
+#define FLAP_FW_VERSION "1.0.0"
+#endif
+#define FLAP_OTA_BOARD "esp8266_flap_switch"
+#include "flap_ota.h"
+
 
 #define SWITCH_PIN D1 // GPIO5 Relay Control
 
@@ -26,9 +34,13 @@ void setup() {
   digitalWrite(SWITCH_PIN, switchState ? HIGH : LOW);
 
   connectWiFi();
+
+  // OTA: checks the server every 10 min for firmware deployed from the dashboard
+  FlapOta::begin(FLAPMAIN_SERVER, DEVICE_ID, DEVICE_KEY);
 }
 
 void loop() {
+  FlapOta::loop(); // OTA update check (does nothing until one is due)
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
   }

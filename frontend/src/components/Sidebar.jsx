@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Database, Key, Bell, LogOut, Terminal,
-  Server, Activity, Link2, CloudSun, Camera, Menu, X, ChevronRight, AlertTriangle, CreditCard
+  Server, Activity, Link2, CloudSun, Camera, Menu, X, ChevronRight, AlertTriangle, CreditCard, Cpu
 } from 'lucide-react';
 
 const NAV_SECTIONS = [
@@ -24,6 +24,7 @@ const NAV_SECTIONS = [
     items: [
       { name: 'Sensor Fusion', path: '/fusion', icon: Link2 },
       { name: 'Hardware & Devices', path: '/devices', icon: Database },
+      { name: 'Firmware Updates', path: '/firmware', icon: Cpu },
     ],
   },
   {

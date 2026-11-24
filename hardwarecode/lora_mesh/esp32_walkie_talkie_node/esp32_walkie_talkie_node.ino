@@ -17,6 +17,25 @@
 
 #include "lora_mesh_protocol.h"
 #include "config.h"
+// Optional: Wi-Fi + key for OTA updates (copy secrets.h.example to secrets.h).
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+// ---- Firmware version & OTA ----
+// Bump FLAP_FW_VERSION for every build you upload to the dashboard.
+// OTA needs Tools -> Partition Scheme -> "Minimal SPIFFS (1.9MB APP with OTA)":
+// with Bluetooth + Wi-Fi the walkie no longer fits the default 1.2 MB app slot.
+#ifndef FLAP_FW_VERSION
+#define FLAP_FW_VERSION "1.1.0"
+#endif
+#define FLAP_OTA_BOARD "esp32_walkie_talkie_node"
+#if defined(OTA_WIFI_SSID) && defined(OTA_SERVER) && defined(OTA_DEVICE_KEY)
+#define OTA_ENABLED 1
+#include "flap_ota.h"
+#else
+#define OTA_ENABLED 0
+#endif
+bool otaCheckRequested = false;
 
 // The sketch needs its own config.h and lora_mesh_protocol.h next to it. Open the
 // whole "esp32_walkie_talkie_node" folder in the Arduino IDE, not a lone .ino file (the IDE then
@@ -720,6 +739,22 @@ void processIncomingPacket(int size) {
   }
   dedupCache.markSeen(pkt.originNode, id);
 
+  // Weather stations are not shown on the walkie, but logging them on USB makes the
+  // walkie a handy radio check: "is station #N on the air, and how strong?"
+  if (pkt.packetType == PKT_TYPE_WEATHER) {
+    Log.printf("🌦  [HEARD] AWS #%u MsgID #%u | RSSI=%d SNR=%.1f | %.1fC %.1f%%\n", pkt.originNode, id, rssi, snr,
+               pkt.temp_x10 / 10.0f, pkt.hum_x10 / 10.0f);
+  }
+
+  // Dashboard asks this radio to check for a firmware update (the image comes over Wi-Fi)
+  if (pkt.originNode == 0 && pkt.packetType == PKT_TYPE_TEXT && !strcmp(pkt.text_msg, "OTA:CHECK") &&
+      (pkt.targetNode == myNodeId || pkt.targetNode == 0)) {
+    Log.println(OTA_ENABLED ? "📡 [OTA] Update check requested over LoRa"
+                            : "📡 [OTA] Update requested over LoRa, but OTA is off (no secrets.h)");
+    otaCheckRequested = OTA_ENABLED;
+    return;
+  }
+
   if (pkt.originNode == myNodeId) {
     Log.println("⚠️ [DUPLICATE NODE ID] Another radio uses this ID. Use '/id <n>' to change it.");
     return;
@@ -892,6 +927,7 @@ void printHelp() {
   Console.println(" /ble            Bluetooth + radio state (for troubleshooting)");
   Console.println(" /i2c            scan the display's I2C bus");
   Console.println(" /debug on|off   also send the debug log over Bluetooth");
+  Console.println(" /ota            check the dashboard for a firmware update (over Wi-Fi)");
   Console.println(" s / c           simulate SELECT / CLICK");
   Console.println(" App protocol: PING | LORA:MSG <text> | LORA:LOC lat,lon,acc");
   Console.println("               LORA:SOS <TYPE> [lat,lon,acc] | LORA:SOS CANCEL");
@@ -1059,6 +1095,10 @@ void handleSerialLine(char *s) {
                    pairWindowOpen() ? 1 : 0, left > 0 ? left / 1000 : 0, loraOk ? 1 : 0);
   }
   else if (!strcasecmp(s, "/unpair")) forgetBondedPhones();
+  else if (!strcasecmp(s, "/ota")) {
+    if (OTA_ENABLED) { otaCheckRequested = true; Console.println("OK:Checking for firmware update"); }
+    else Console.println("ERR:OTA is off (add secrets.h with Wi-Fi details and rebuild)");
+  }
   else if (!strcasecmp(s, "s")) onSelect();
   else if (!strcasecmp(s, "c")) onClick();
   else if (!strncasecmp(s, "/id ", 4)) {
@@ -1285,7 +1325,7 @@ bool initLora() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.printf("\n[BOOT] FlapMain ESP32 walkie #%u starting (type /help, Serial Monitor at 115200)\n", WALKIE_NODE_ID);
+  Serial.printf("\n[BOOT] FlapMain ESP32 walkie v" FLAP_FW_VERSION " #%u starting (type /help, Serial Monitor at 115200)\n", WALKIE_NODE_ID);
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
   btnSelect.begin(BTN_SELECT_PIN, 3000, "SELECT"); // hold 3 s: open the Bluetooth pairing window
@@ -1323,6 +1363,22 @@ void setup() {
 }
 
 void loop() {
+#if OTA_ENABLED
+  if (otaCheckRequested) {
+    otaCheckRequested = false;
+    static bool otaStarted = false;
+    if (!otaStarted) {
+      char otaId[32];
+      snprintf(otaId, sizeof(otaId), "node-%u", myNodeId);
+      FlapOta::onBeforeUpdate([]() { LoRa.sleep(); splash("UPDATING", "do not power off"); });
+      FlapOta::begin(OTA_SERVER, otaId, OTA_DEVICE_KEY, myNodeId);
+      otaStarted = true;
+    }
+    if (loraOk) LoRa.idle();
+    if (!FlapOta::checkWithWifi(OTA_WIFI_SSID, OTA_WIFI_PASSWORD)) Console.println("OK:No firmware update");
+    if (loraOk) LoRa.receive();
+  }
+#endif
   if (loraOk) {
     int size = LoRa.parsePacket();
     if (size > 0) {

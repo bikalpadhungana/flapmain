@@ -19,6 +19,7 @@ const deviceTypeRoutes = require('./routes/deviceTypes');
 const apiKeyRoutes = require('./routes/apiKeys');
 const alertRuleRoutes = require('./routes/alertRules');
 const fusionGroupRoutes = require('./routes/fusionGroups');
+const firmwareRoutes = require('./routes/firmware');
 
 // Swagger config import
 const swaggerDocument = require('./config/swagger.json');
@@ -105,6 +106,9 @@ app.use('/api/v1/device-types', deviceTypeRoutes);
 app.use('/api/v1/api-keys', apiKeyRoutes);
 app.use('/api/v1/alerts/rules', alertRuleRoutes);
 app.use('/api/v1/fusion-groups', fusionGroupRoutes);
+// OTA firmware updates (dashboard + devices; see routes/firmware.js)
+app.use('/api/v1/firmware', firmwareRoutes);
+app.use('/v1/firmware', firmwareRoutes);
 
 // Tap Device & Tag API Compatibility Routes
 app.use('/api/device', deviceRoutes);

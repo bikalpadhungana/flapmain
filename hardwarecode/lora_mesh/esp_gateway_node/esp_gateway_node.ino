@@ -49,6 +49,18 @@
   #define FLAPMAIN_DEVICE_KEY "flap_dev_aab35d32a090cf3116ec2fdd83bc063e46ee39faeeffc8ca"
 #endif
 
+// ---- Firmware version & OTA updates from the dashboard (Firmware page) ----
+// Bump FLAP_FW_VERSION for every build you upload, or the gateway sees no update.
+#ifndef FLAP_FW_VERSION
+  #define FLAP_FW_VERSION "2.2.0"
+#endif
+#define FLAP_OTA_BOARD "esp_gateway_node"
+// The gateway's own ID in the dashboard (also sent as gateway_id with every packet).
+#ifndef GATEWAY_DEVICE_ID
+  #define GATEWAY_DEVICE_ID "esp_gateway_node_01"
+#endif
+#include "flap_ota.h"
+
 // ---- Global Network & State Instances ----
 WebServerType server(80);
 WiFiUDP ntpUDP;
@@ -299,7 +311,7 @@ void processMeshPacket(const LoRaMeshPacket &pkt, int rssi, float snr) {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== FlapMain ESP LoRa Mesh Gateway Initializing ===");
+  Serial.println("\n=== FlapMain ESP LoRa Mesh Gateway v" FLAP_FW_VERSION " Initializing ===");
 
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, HIGH); // OFF (Active LOW)
@@ -408,6 +420,12 @@ void setup() {
 
   server.begin();
   Serial.println("Local Web Server Online. Gateway ready to receive LoRa mesh packets.");
+
+  // OTA: checks the server every 10 min for firmware deployed from the dashboard.
+  // The gateway authenticates with its device key; the radio sleeps while flashing.
+  FlapOta::onBeforeUpdate([]() { LoRa.sleep(); });
+  FlapOta::begin(FLAPMAIN_SERVER, GATEWAY_DEVICE_ID, FLAPMAIN_DEVICE_KEY);
+
   LoRa.receive();
 }
 
@@ -457,6 +475,9 @@ void loop() {
     pollOutboxAndRelay();
   }
 
+  // ── OTA firmware check (every 10 min; reboots into new firmware if deployed) ──
+  FlapOta::loop();
+
   delay(10); // Short yield — keeps parsePacket() polling fast
 }
 
@@ -498,7 +519,7 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
   float altitude = (pkt.pressure_pa > 0) ? (44330.0 * (1.0 - pow((float)pkt.pressure_pa / 101325.0, 0.1903))) : 0.0;
 
   String postData = "{";
-  postData += "\"gateway_id\":\"esp_gateway_node_01\",";
+  postData += "\"gateway_id\":\"" GATEWAY_DEVICE_ID "\",";
   postData += "\"device_id\":\"" + nodeDeviceId + "\",";
   postData += "\"device_type\":\"" + devType + "\",";
   postData += "\"wind_speed\":" + String(pkt.wind_speed_x10 / 10.0, 1) + ",";
@@ -533,8 +554,17 @@ void forwardToCloudApi(const LoRaMeshPacket &pkt, int rssi, float snr) {
 
   int httpCode = http.POST(postData);
 
-  if (httpCode >= 200 && httpCode < 300) {
-    Serial.printf("[Cloud Forward] Success | HTTP %d\n", httpCode);
+  if (httpCode == 202) {
+    // Accepted but held: the server does not know this node yet (see Devices -> Discovered devices).
+    Serial.printf("[Cloud Forward] HELD (HTTP 202): Node #%d is not registered. Dashboard -> Devices -> "
+                  "Discovered devices -> Add \"%s\" (or attach it to its station). Its data appears after that.\n",
+                  pkt.originNode, nodeDeviceId.c_str());
+  } else if (httpCode == 200) {
+    Serial.println("[Cloud Forward] Duplicate (HTTP 200): already received via another gateway");
+  } else if (httpCode >= 200 && httpCode < 300) {
+    Serial.printf("[Cloud Forward] Saved | HTTP %d\n", httpCode);
+  } else if (httpCode == 401) {
+    Serial.println("[Cloud Forward] HTTP 401: FLAPMAIN_DEVICE_KEY in config.h is not accepted by the server");
   } else if (httpCode > 0) {
     Serial.printf("[Cloud Forward] HTTP Error: %d\n", httpCode);
   } else {

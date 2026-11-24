@@ -17,6 +17,14 @@
 #include <Adafruit_BMP085.h>
 #include <Wire.h>
 #include "config.h"
+// ---- Firmware version & OTA updates from the dashboard (Firmware page) ----
+// Bump FLAP_FW_VERSION for every build you upload, or the device sees no update.
+#ifndef FLAP_FW_VERSION
+#define FLAP_FW_VERSION "1.0.0"
+#endif
+#define FLAP_OTA_BOARD "esp8266_weather_station"
+#include "flap_ota.h"
+
 
 // --- Pin Allocations (Optimized to prevent I2C & Interrupt conflicts) ---
 // I2C Bus (BMP085): SDA = GPIO4 (D2), SCL = GPIO5 (D1)
@@ -271,10 +279,14 @@ void setup() {
   Serial.println("Local Web Server Online.");
   lastTime = millis();
   lastRead = millis();
+
+  // OTA: checks the server every 10 min for firmware deployed from the dashboard
+  FlapOta::begin(FLAPMAIN_SERVER, FLAPMAIN_DEVICE_ID, FLAPMAIN_DEVICE_KEY);
 }
 
 // --- Main Program Execution Loop ---
 void loop() {
+  FlapOta::loop(); // OTA update check (does nothing until one is due)
   server.handleClient();
 
   unsigned long currentMillis = millis();

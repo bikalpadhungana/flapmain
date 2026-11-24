@@ -18,7 +18,7 @@ const MeshMessageSchema = new mongoose.Schema(
     rssi: { type: Number, default: 0 },
     snr: { type: Number, default: 0 },
     // Parsed from the text conventions (see services/meshText.js)
-    kind: { type: String, enum: ['msg', 'loc', 'sos', 'sos_cancel', 'heartbeat'], default: 'msg' },
+    kind: { type: String, enum: ['msg', 'loc', 'sos', 'sos_cancel', 'heartbeat', 'control'], default: 'msg' },
     sos_type: { type: String, default: null },
     lat: { type: Number, default: null },
     lon: { type: Number, default: null },

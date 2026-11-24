@@ -28,6 +28,27 @@
 #if !defined(PKT_TYPE_ACK) || !defined(DEFAULT_MAX_TTL)
 #error "Wrong lora_mesh_protocol.h: use the one from the esp32_aws_node folder"
 #endif
+// Optional: Wi-Fi + key for OTA updates (copy secrets.h.example to secrets.h).
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+
+// ---- Firmware version & OTA ----
+// Bump FLAP_FW_VERSION for every build you upload to the dashboard.
+#ifndef FLAP_FW_VERSION
+#define FLAP_FW_VERSION "1.1.0"
+#endif
+#define FLAP_OTA_BOARD "esp32_aws_node"
+#ifndef OTA_CHECK_HOURS
+#define OTA_CHECK_HOURS 6
+#endif
+#if defined(OTA_WIFI_SSID) && defined(OTA_SERVER) && defined(OTA_DEVICE_KEY)
+#define OTA_ENABLED 1
+#include "flap_ota.h"
+#else
+#define OTA_ENABLED 0
+#endif
+
 #include <Adafruit_BMP085.h>
 #include <DHT.h>
 #include <LoRa.h>
@@ -184,9 +205,13 @@ bool sendMeshPacket(uint8_t packetType, uint8_t alertLevel) {
   return ok;
 }
 
-#if ENABLE_AWS_SOS_RELAY
-// ---- Relay walkie text / SOS packets heard from other nodes ----
-void handleRelay() {
+// ---- Incoming LoRa packets ----
+// The station listens between transmissions for:
+//  - "OTA:CHECK" from the base station (dashboard deployed new firmware), and
+//  - walkie text / SOS to relay, when ENABLE_AWS_SOS_RELAY is on.
+bool otaCheckRequested = false;
+
+void handleIncoming() {
   int packetSize = LoRa.parsePacket();
   if (packetSize <= 0) return;
   if (packetSize != (int)sizeof(LoRaMeshPacket)) {
@@ -196,13 +221,26 @@ void handleRelay() {
 
   LoRaMeshPacket rx;
   LoRa.readBytes((uint8_t *)&rx, sizeof(rx));
+  rx.text_msg[sizeof(rx.text_msg) - 1] = '\0';
   uint16_t msgId = ((uint16_t)rx.msgIdHi << 8) | rx.msgIdLo;
 
   if (rx.originNode == AWS_NODE_ID) return;
-  if (rx.packetType != PKT_TYPE_SOS && rx.packetType != PKT_TYPE_TEXT && rx.packetType != PKT_TYPE_ACK) return;
   if (dedupCache.alreadySeen(rx.originNode, msgId)) return;
   dedupCache.markSeen(rx.originNode, msgId);
 
+  if (rx.originNode == 0 && rx.packetType == PKT_TYPE_TEXT && !strcmp(rx.text_msg, "OTA:CHECK") &&
+      (rx.targetNode == AWS_NODE_ID || rx.targetNode == 0)) {
+#if OTA_ENABLED
+    Serial.println(F("📡 [OTA] Update check requested over LoRa"));
+    otaCheckRequested = true;
+#else
+    Serial.println(F("📡 [OTA] Update requested over LoRa, but OTA is off (no secrets.h with Wi-Fi details)"));
+#endif
+    if (rx.targetNode == AWS_NODE_ID) return; // addressed to us: don't relay
+  }
+
+#if ENABLE_AWS_SOS_RELAY
+  if (rx.packetType != PKT_TYPE_SOS && rx.packetType != PKT_TYPE_TEXT && rx.packetType != PKT_TYPE_ACK) return;
   if (rx.ttl > 1) {
     rx.ttl--;
     delay(random(50, 150)); // jitter against collisions with other relays
@@ -212,6 +250,17 @@ void handleRelay() {
     LoRa.receive();
     Serial.printf("🔁 [AWS RELAY] MsgID #%u from Node #%u (type %u, TTL %u)\n", msgId, rx.originNode, rx.packetType, rx.ttl);
   }
+#endif
+}
+
+#if OTA_ENABLED
+// Join Wi-Fi, ask the dashboard for an update, switch Wi-Fi off again.
+// On success the board reboots into the new firmware inside this call.
+void runOtaCheck(const char *why) {
+  Serial.printf("[OTA] Checking for firmware updates (%s)\n", why);
+  LoRa.idle();
+  FlapOta::checkWithWifi(OTA_WIFI_SSID, OTA_WIFI_PASSWORD);
+  LoRa.receive();
 }
 #endif
 
@@ -219,7 +268,7 @@ void handleRelay() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.printf("\n=== FlapMain ESP32 AWS LoRa Mesh Node (Node #%d) ===\n", AWS_NODE_ID);
+  Serial.printf("\n=== FlapMain ESP32 AWS LoRa Mesh Node v" FLAP_FW_VERSION " (Node #%d) ===\n", AWS_NODE_ID);
 
   pinMode(NORTH_PIN, INPUT_PULLUP);
   pinMode(EAST_PIN, INPUT_PULLUP);
@@ -265,13 +314,20 @@ void setup() {
   LoRa.setTxPower(LORA_TX_POWER);
   LoRa.setSyncWord(LORA_SYNC_WORD);
   LoRa.enableCrc(); // must match every other node
-#if ENABLE_AWS_SOS_RELAY
-  LoRa.receive();
-#endif
+  LoRa.receive();     // listen between transmissions (OTA:CHECK, optional relay)
 
   Serial.printf("[LoRa] SX1278 online — SF%d / %dkHz / 4:%d / CRC / SyncWord=0x%02X / %u-byte packets\n",
                 LORA_SPREADING_FACTOR, (int)(LORA_BANDWIDTH / 1000), LORA_CODING_RATE, LORA_SYNC_WORD, (unsigned)sizeof(LoRaMeshPacket));
-  Serial.printf("[AWS Ready] Broadcasting telemetry every %lus.\n\n", (unsigned long)(TELEMETRY_INTERVAL / 1000));
+  Serial.printf("[AWS Ready] Broadcasting telemetry every %lus.\n", (unsigned long)(TELEMETRY_INTERVAL / 1000));
+#if OTA_ENABLED
+  char otaId[32];
+  snprintf(otaId, sizeof(otaId), "flap-flap-aws-%03d-node", AWS_NODE_ID);
+  FlapOta::onBeforeUpdate([]() { LoRa.sleep(); });
+  FlapOta::begin(OTA_SERVER, otaId, OTA_DEVICE_KEY, AWS_NODE_ID);
+#else
+  Serial.println("[OTA] Off: add secrets.h (see secrets.h.example) to enable updates from the dashboard.");
+#endif
+  Serial.println();
 
   // Random start so radios don't drop our packets as duplicates after a reboot.
   msgSequenceCounter = (uint16_t)(esp_random() % 60000) + 1;
@@ -303,13 +359,21 @@ void loop() {
     nextInterval = TELEMETRY_INTERVAL + random(0, 300); // jitter avoids periodic collisions
     readAllSensors();
     sendMeshPacket(PKT_TYPE_WEATHER, 0);
-#if ENABLE_AWS_SOS_RELAY
     LoRa.receive();
-#endif
   }
 
-#if ENABLE_AWS_SOS_RELAY
-  handleRelay();
+  handleIncoming();
+
+#if OTA_ENABLED
+  // Update check: 1 min after boot, every OTA_CHECK_HOURS, or when asked over LoRa.
+  static unsigned long nextOtaCheck = 60000UL;
+  if (otaCheckRequested) {
+    otaCheckRequested = false;
+    runOtaCheck("requested over LoRa");
+  } else if ((long)(now - nextOtaCheck) >= 0) {
+    nextOtaCheck = now + OTA_CHECK_HOURS * 3600000UL;
+    runOtaCheck("scheduled");
+  }
 #endif
 
   delay(10);
