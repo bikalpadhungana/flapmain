@@ -13,6 +13,9 @@ const { getJwtSecret } = require('../config/security');
 const FIRMWARE_DIR = process.env.FIRMWARE_DIR || path.join(__dirname, '../../firmware_store');
 const MAX_FIRMWARE_BYTES = 4 * 1024 * 1024; // largest ESP32 app partition in common schemes
 const LINK_TTL_S = 15 * 60;
+// Ready-made builds (e.g. from arduino-cli) that the dashboard can import in one click.
+const FIRMWARE_BUILDS_DIR = process.env.FIRMWARE_BUILDS_DIR || path.join(__dirname, '../../../firmware_builds');
+const BUILD_NAME = /^([A-Za-z0-9_.]+?)-(\d[0-9A-Za-z_.+]*)\.bin$/; // <board>-<version>.bin
 
 const ensureDir = () => fs.mkdirSync(FIRMWARE_DIR, { recursive: true });
 const filePath = (id) => path.join(FIRMWARE_DIR, `${String(id).replace(/[^a-f0-9]/gi, '')}.bin`);
@@ -46,6 +49,27 @@ const deleteImage = (id) => {
 
 const imageExists = (id) => fs.existsSync(filePath(id));
 
+/** Files in FIRMWARE_BUILDS_DIR named <board>-<version>.bin (newest first). */
+const listBuilds = () => {
+  let names = [];
+  try { names = fs.readdirSync(FIRMWARE_BUILDS_DIR); } catch (_) { return []; }
+  return names
+    .map((file) => {
+      const m = file.match(BUILD_NAME);
+      if (!m) return null;
+      const st = fs.statSync(path.join(FIRMWARE_BUILDS_DIR, file));
+      return st.isFile() ? { file, board: m[1], version: m[2], size: st.size, modified: st.mtime } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.modified - a.modified);
+};
+
+/** Read a build by its exact listed file name (never a caller-supplied path). */
+const readBuild = (file) => {
+  if (!BUILD_NAME.test(file) || path.basename(file) !== file) throw new Error('Invalid build name');
+  return fs.readFileSync(path.join(FIRMWARE_BUILDS_DIR, file));
+};
+
 const secret = () => process.env.OTA_LINK_SECRET || getJwtSecret();
 
 const sign = (fwId, deviceId, exp) =>
@@ -68,6 +92,9 @@ const verifyLink = (fwId, deviceId, exp, token) => {
 
 module.exports = {
   FIRMWARE_DIR,
+  FIRMWARE_BUILDS_DIR,
+  listBuilds,
+  readBuild,
   MAX_FIRMWARE_BYTES,
   inspectImage,
   saveImage,

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import {
-  UploadCloud, Cpu, Rocket, Trash2, RefreshCw, Radio, CheckCircle2, XCircle, Clock, Download, Ban,
+  UploadCloud, Cpu, Rocket, Trash2, RefreshCw, Radio, CheckCircle2, XCircle, Clock, Download, Ban, Package, Plus,
 } from 'lucide-react';
 import Modal from '../components/Modal';
 import { API_BASE_URL, authHeaders, socketOptions } from '../config';
@@ -33,10 +33,14 @@ const timeAgo = (d) => {
   return new Date(d).toLocaleDateString();
 };
 
-// "esp_gateway_node.ino.bin" -> "esp_gateway_node"
-const boardFromFilename = (name) => {
-  const base = String(name || '').replace(/\.ino.*$|\.bin.*$/i, '');
-  return KNOWN_BOARDS.find((b) => base === b.id || base.startsWith(`${b.id}`))?.id || '';
+// "esp_gateway_node-2.2.0.bin" -> { board: "esp_gateway_node", version: "2.2.0" }
+// "esp_gateway_node.ino.bin"   -> { board: "esp_gateway_node", version: "" }
+const parseFilename = (name) => {
+  const n = String(name || '');
+  const m = n.match(/^([A-Za-z0-9_.]+?)-(\d[0-9A-Za-z_.+]*)\.bin$/);
+  if (m) return { board: m[1], version: m[2] };
+  const base = n.replace(/\.ino.*$|\.bin.*$/i, '');
+  return { board: KNOWN_BOARDS.find((b) => base === b.id)?.id || '', version: '' };
 };
 
 const STATE_STYLE = {
@@ -62,6 +66,9 @@ function StatePill({ state }) {
 
 export default function Firmware() {
   const [firmware, setFirmware] = useState([]);
+  const [builds, setBuilds] = useState({ dir: '', builds: [] });
+  const [importing, setImporting] = useState('');
+  const [importMsg, setImportMsg] = useState(null);
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -83,11 +90,13 @@ export default function Firmware() {
 
   const load = useCallback(async () => {
     try {
-      const [f, d] = await Promise.all([
+      const [f, d, b] = await Promise.all([
         fetch(API, { headers: authHeaders() }).then((r) => r.json()),
         fetch(`${API}/devices`, { headers: authHeaders() }).then((r) => r.json()),
+        fetch(`${API}/builds`, { headers: authHeaders() }).then((r) => r.json()).catch(() => ({})),
       ]);
       setFirmware(f.firmware || []);
+      setBuilds({ dir: b.dir || '', builds: b.builds || [] });
       setDevices(d.devices || []);
       setError('');
     } catch (e) {
@@ -110,7 +119,27 @@ export default function Firmware() {
   const onPickFile = (f) => {
     setFile(f);
     setUploadMsg(null);
-    if (f && !board) setBoard(boardFromFilename(f.name));
+    if (f) {
+      const parsed = parseFilename(f.name);
+      if (parsed.board) setBoard(parsed.board);
+      if (parsed.version) setVersion(parsed.version);
+    }
+  };
+
+  const importBuild = async (build) => {
+    setImporting(build.file);
+    setImportMsg(null);
+    const res = await fetch(`${API}/builds/import`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ file: build.file }),
+    });
+    const body = await res.json().catch(() => ({}));
+    setImporting('');
+    setImportMsg(res.status === 201
+      ? { ok: true, text: `Added ${build.board} ${build.version} to the library. Click Deploy to send it to devices.` }
+      : { ok: false, text: body.message || `Import failed (HTTP ${res.status})` });
+    load();
   };
 
   const upload = (e) => {
@@ -231,7 +260,7 @@ export default function Firmware() {
           </div>
         </div>
         <p className="text-muted text-xs m-0">
-          Arduino IDE: <b>Sketch → Export Compiled Binary</b>, then upload <code>&lt;sketch&gt;.ino.bin</code>.
+          Arduino IDE: <b>Sketch → Export Compiled Binary</b>, then upload <code>&lt;sketch&gt;.ino.bin</code>. A file named <code>&lt;board&gt;-&lt;version&gt;.bin</code> fills in both fields.
           The version must match <code>FLAP_FW_VERSION</code> in that build, or the device will download it again and again.
         </p>
         <div className="flex items-center gap-3">
@@ -243,6 +272,46 @@ export default function Firmware() {
           )}
         </div>
       </form>
+
+      {/* Ready-made builds on the server */}
+      <div className="card card-body flex flex-col gap-3">
+        <h3 className="font-semibold text-main m-0 flex items-center gap-2"><Package size={18} /> Ready-made builds</h3>
+        <p className="text-muted text-xs m-0">
+          Files named <code>&lt;board&gt;-&lt;version&gt;.bin</code> in the server's build folder{builds.dir ? <> (<code>{builds.dir}</code>)</> : null}.
+          Add one to the library, then deploy it.
+        </p>
+        {builds.builds.length === 0 ? (
+          <div className="text-muted text-sm">No builds found on the server.</div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="responsive-table">
+              <thead><tr><th>Board</th><th>Version</th><th>Size</th><th>Built</th><th /></tr></thead>
+              <tbody>
+                {builds.builds.map((b) => (
+                  <tr key={b.file}>
+                    <td><b>{boardLabel(b.board)}</b><div className="text-xs text-muted">{b.file}</div></td>
+                    <td><code>{b.version}</code></td>
+                    <td>{fmtSize(b.size)}</td>
+                    <td title={new Date(b.modified).toLocaleString()}>{timeAgo(b.modified)}</td>
+                    <td style={{ textAlign: 'right' }}>
+                      {b.in_library ? (
+                        <span className="text-xs" style={{ color: 'var(--status-success)' }}><CheckCircle2 size={13} style={{ verticalAlign: -2 }} /> In library</span>
+                      ) : (
+                        <button className="btn btn-primary btn-sm" disabled={importing === b.file} onClick={() => importBuild(b)}>
+                          <Plus size={14} /> {importing === b.file ? 'Adding…' : 'Add to library'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {importMsg && (
+          <span className="text-sm" style={{ color: importMsg.ok ? 'var(--status-success)' : 'var(--status-error)' }}>{importMsg.text}</span>
+        )}
+      </div>
 
       {/* Firmware library */}
       <div className="card card-body flex flex-col gap-3">

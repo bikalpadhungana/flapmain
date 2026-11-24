@@ -3,6 +3,8 @@
 // Dashboard (JWT):
 //   GET    /firmware                 uploaded images
 //   POST   /firmware?board=&version=&notes=   upload a .bin (body: application/octet-stream)
+//   GET    /firmware/builds          ready-made .bin files in FIRMWARE_BUILDS_DIR
+//   POST   /firmware/builds/import   { file } add one of them to the library
 //   DELETE /firmware/:id
 //   GET    /firmware/devices         every device with its reported firmware and OTA state
 //   POST   /firmware/:id/deploy      { device_ids: [...], lora_wake: bool }
@@ -79,43 +81,87 @@ router.get('/', authenticateUser, async (req, res) => {
   res.json({ status: 'success', firmware: list.map(toClientFirmware) });
 });
 
+/**
+ * Validate an image and add it to the org's library. Returns { status, body } for the response.
+ * Shared by browser uploads and by importing a ready-made build from FIRMWARE_BUILDS_DIR.
+ */
+const addFirmware = async ({ req, buf, board, version, notes, filename }) => {
+  if (!validBoard(board)) return { status: 400, body: { status: 'error', message: 'Board must be 2-48 letters, digits, _ . or -' } };
+  if (!validVersion(version)) return { status: 400, body: { status: 'error', message: 'Version must be 1-32 characters: letters, digits, . _ + -' } };
+  if (!Buffer.isBuffer(buf)) {
+    return { status: 400, body: { status: 'error', message: 'Send the .bin file as the request body with Content-Type: application/octet-stream' } };
+  }
+  const info = store.inspectImage(buf);
+  if (!info.ok) return { status: 400, body: { status: 'error', message: info.error } };
+
+  if (await Firmware.exists({ org_id: req.org_id, board, version })) {
+    return { status: 409, body: { status: 'error', message: `${board} ${version} is already in the library. Bump FLAP_FW_VERSION and rebuild.` } };
+  }
+
+  const fw = new Firmware({
+    org_id: req.org_id,
+    board,
+    version,
+    chip: info.chip,
+    filename: clean(filename, 120),
+    size: buf.length,
+    md5: crypto.createHash('md5').update(buf).digest('hex'),
+    sha256: crypto.createHash('sha256').update(buf).digest('hex'),
+    notes: clean(notes, 500),
+    uploaded_by: req.user?._id || null,
+  });
+  store.saveImage(fw._id, buf);
+  await fw.save();
+  console.log(`[OTA] Added ${board} ${version} (${buf.length} bytes, ${info.chip}) from ${filename || 'upload'}`);
+  return { status: 201, body: { status: 'success', firmware: toClientFirmware(fw) } };
+};
+
 router.post('/', authenticateUser, async (req, res) => {
   try {
-    const board = clean(req.query.board, 48);
-    const version = clean(req.query.version, 32);
-    if (!validBoard(board)) return res.status(400).json({ status: 'error', message: 'Board must be 2-48 letters, digits, _ . or -' });
-    if (!validVersion(version)) return res.status(400).json({ status: 'error', message: 'Version must be 1-32 characters: letters, digits, . _ + -' });
-
-    const buf = req.body;
-    if (!Buffer.isBuffer(buf)) {
-      return res.status(400).json({ status: 'error', message: 'Send the .bin file as the request body with Content-Type: application/octet-stream' });
-    }
-    const info = store.inspectImage(buf);
-    if (!info.ok) return res.status(400).json({ status: 'error', message: info.error });
-
-    if (await Firmware.exists({ org_id: req.org_id, board, version })) {
-      return res.status(409).json({ status: 'error', message: `${board} ${version} is already uploaded. Bump FLAP_FW_VERSION and rebuild.` });
-    }
-
-    const fw = new Firmware({
-      org_id: req.org_id,
-      board,
-      version,
-      chip: info.chip,
-      filename: clean(req.headers['x-filename'], 120),
-      size: buf.length,
-      md5: crypto.createHash('md5').update(buf).digest('hex'),
-      sha256: crypto.createHash('sha256').update(buf).digest('hex'),
-      notes: clean(req.query.notes, 500),
-      uploaded_by: req.user?._id || null,
+    const r = await addFirmware({
+      req,
+      buf: req.body,
+      board: clean(req.query.board, 48),
+      version: clean(req.query.version, 32),
+      notes: req.query.notes,
+      filename: req.headers['x-filename'],
     });
-    store.saveImage(fw._id, buf);
-    await fw.save();
-    console.log(`[OTA] Uploaded ${board} ${version} (${buf.length} bytes, ${info.chip})`);
-    res.status(201).json({ status: 'success', firmware: toClientFirmware(fw) });
+    res.status(r.status).json(r.body);
   } catch (err) {
     console.error('[OTA] Upload failed:', err);
     res.status(500).json({ status: 'error', message: 'Upload failed' });
+  }
+});
+
+// Ready-made builds on the server (FIRMWARE_BUILDS_DIR, default <repo>/firmware_builds),
+// named "<board>-<version>.bin", e.g. esp_gateway_node-2.2.0.bin.
+router.get('/builds', authenticateUser, async (req, res) => {
+  const builds = store.listBuilds();
+  const inLibrary = await Firmware.find({ org_id: req.org_id }).select('board version').lean();
+  const have = new Set(inLibrary.map((f) => `${f.board}@${f.version}`));
+  res.json({
+    status: 'success',
+    dir: store.FIRMWARE_BUILDS_DIR,
+    builds: builds.map((b) => ({ ...b, in_library: have.has(`${b.board}@${b.version}`) })),
+  });
+});
+
+router.post('/builds/import', authenticateUser, async (req, res) => {
+  try {
+    const build = store.listBuilds().find((b) => b.file === String(req.body?.file || ''));
+    if (!build) return res.status(404).json({ status: 'error', message: 'Build not found' });
+    const r = await addFirmware({
+      req,
+      buf: store.readBuild(build.file),
+      board: build.board,
+      version: build.version,
+      notes: req.body?.notes || 'Imported from firmware_builds',
+      filename: build.file,
+    });
+    res.status(r.status).json(r.body);
+  } catch (err) {
+    console.error('[OTA] Import failed:', err);
+    res.status(500).json({ status: 'error', message: 'Import failed' });
   }
 });
 
