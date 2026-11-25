@@ -1,0 +1,26 @@
+/*
+ * FlapMain door lock configuration. Copy this file to config.h (git-ignored) and fill it in.
+ * Register the lock first: Dashboard -> Hardware & Devices -> Add device, type "Door Lock"
+ * (door_lock). Use the device ID and key shown there.
+ */
+#ifndef FLAP_LOCK_CONFIG_H
+#define FLAP_LOCK_CONFIG_H
+
+#define WIFI_SSID           "your-wifi"
+#define WIFI_PASSWORD       "your-wifi-password"
+
+#define FLAPMAIN_SERVER     "http://main.esainnovation.com:5003"
+#define FLAPMAIN_DEVICE_ID  "flap-lock-001"
+#define FLAPMAIN_DEVICE_KEY "flap_dev_..."
+
+// ---- Hardware (NodeMCU ESP8266) ----
+#define HALL_SENSOR_PIN     D2   // A3144 output (open collector, internal pull-up). LOW = magnet
+#define RELAY_PIN           D1   // relay / MOSFET driving the lock
+#define RELAY_ACTIVE_LOW    1    // most 5 V relay modules switch ON with LOW; set 0 if yours uses HIGH
+
+// ---- Behaviour ----
+#define UNLOCK_DURATION_MS  5000 // magnet unlock time (dashboard chooses its own, 1-60 s)
+#define ENABLE_MAGNET_UNLOCK 1   // 0 = only the dashboard can unlock
+#define POLL_INTERVAL_MS    1500 // how often the lock asks the server for a command
+
+#endif

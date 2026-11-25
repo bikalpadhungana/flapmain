@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Database, Key, Bell, LogOut, Terminal,
-  Server, Activity, Link2, CloudSun, Camera, Menu, X, ChevronRight, AlertTriangle, CreditCard, Cpu
+  Server, Activity, Link2, CloudSun, Camera, Menu, X, ChevronRight, AlertTriangle, CreditCard, Cpu, Lock
 } from 'lucide-react';
 
 const NAV_SECTIONS = [
@@ -12,6 +12,7 @@ const NAV_SECTIONS = [
       { name: 'Fleet Overview', path: '/', icon: LayoutDashboard },
       { name: 'System Monitor', path: '/system-monitor', icon: Server },
       { name: 'Card Readers', path: '/card-readers', icon: CreditCard },
+      { name: 'Door Locks', path: '/door-locks', icon: Lock },
       { name: 'Scale Monitor', path: '/scale-monitor', icon: Activity },
       { name: 'Weather Station', path: '/weather-monitor', icon: CloudSun },
       { name: 'SOS & LoRa Mesh', path: '/sos-alert', icon: AlertTriangle },

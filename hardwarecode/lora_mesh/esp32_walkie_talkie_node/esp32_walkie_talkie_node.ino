@@ -23,13 +23,14 @@
 #endif
 // ---- Firmware version & OTA ----
 // Bump FLAP_FW_VERSION for every build you upload to the dashboard.
-// OTA needs Tools -> Partition Scheme -> "Minimal SPIFFS (1.9MB APP with OTA)":
-// with Bluetooth + Wi-Fi the walkie no longer fits the default 1.2 MB app slot.
+// OTA is opt-in: add "#define WALKIE_OTA 1" to secrets.h AND set Tools -> Partition
+// Scheme -> "Minimal SPIFFS (1.9MB APP with OTA)". With Bluetooth + Wi-Fi the walkie is
+// 1.9 MB and does not fit the default 1.3 MB app slot ("Sketch too big").
 #ifndef FLAP_FW_VERSION
-#define FLAP_FW_VERSION "1.1.0"
+#define FLAP_FW_VERSION "1.1.1"
 #endif
 #define FLAP_OTA_BOARD "esp32_walkie_talkie_node"
-#if defined(OTA_WIFI_SSID) && defined(OTA_SERVER) && defined(OTA_DEVICE_KEY)
+#if defined(WALKIE_OTA) && WALKIE_OTA && defined(OTA_WIFI_SSID) && defined(OTA_SERVER) && defined(OTA_DEVICE_KEY)
 #define OTA_ENABLED 1
 #include "flap_ota.h"
 #else
@@ -752,7 +753,7 @@ void processIncomingPacket(int size) {
   if (pkt.originNode == 0 && pkt.packetType == PKT_TYPE_TEXT && !strcmp(pkt.text_msg, "OTA:CHECK") &&
       (pkt.targetNode == myNodeId || pkt.targetNode == 0)) {
     Log.println(OTA_ENABLED ? "📡 [OTA] Update check requested over LoRa"
-                            : "📡 [OTA] Update requested over LoRa, but OTA is off (no secrets.h)");
+                            : "📡 [OTA] Update requested over LoRa, but OTA is off (WALKIE_OTA not set)");
     otaCheckRequested = OTA_ENABLED;
     return;
   }
@@ -1099,7 +1100,7 @@ void handleSerialLine(char *s) {
   else if (!strcasecmp(s, "/unpair")) forgetBondedPhones();
   else if (!strcasecmp(s, "/ota")) {
     if (OTA_ENABLED) { otaCheckRequested = true; Console.println("OK:Checking for firmware update"); }
-    else Console.println("ERR:OTA is off (add secrets.h with Wi-Fi details and rebuild)");
+    else Console.println("ERR:OTA is off (set WALKIE_OTA 1 in secrets.h, Minimal SPIFFS partition, rebuild)");
   }
   else if (!strcasecmp(s, "s")) onSelect();
   else if (!strcasecmp(s, "c")) onClick();

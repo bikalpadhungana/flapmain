@@ -103,6 +103,19 @@ const DeviceSchema = new mongoose.Schema(
       chip: { type: String, default: '' },
       reported_at: { type: Date, default: null },
     },
+    // Door locks (device_type "door_lock"): last reported state + one pending command
+    lock: {
+      state: { type: String, enum: ['locked', 'unlocked', 'unknown'], default: 'unknown' },
+      changed_at: { type: Date, default: null },
+      last_poll: { type: Date, default: null },
+      pending: {
+        id: { type: String, default: '' },
+        action: { type: String, enum: ['unlock', 'lock', ''], default: '' },
+        duration_ms: { type: Number, default: 0 },
+        by: { type: String, default: '' },
+        expires_at: { type: Date, default: null },
+      },
+    },
     // Over-the-air update requested from the dashboard
     ota: {
       target: { type: mongoose.Schema.Types.ObjectId, ref: 'Firmware', default: null },

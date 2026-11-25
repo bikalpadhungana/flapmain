@@ -20,6 +20,7 @@ const apiKeyRoutes = require('./routes/apiKeys');
 const alertRuleRoutes = require('./routes/alertRules');
 const fusionGroupRoutes = require('./routes/fusionGroups');
 const firmwareRoutes = require('./routes/firmware');
+const lockRoutes = require('./routes/locks');
 
 // Swagger config import
 const swaggerDocument = require('./config/swagger.json');
@@ -33,6 +34,7 @@ console.log(`[SECURITY] DEVICE_AUTH_MODE=${deviceAuthMode()} SOCKET_AUTH_MODE=${
 // Connect to MongoDB
 connectDB()
   .then(() => {
+    lockRoutes.ensureLockType().catch((e) => console.error('[LOCK] Could not register door_lock type:', e.message));
     // ============================================================
     // MQTT DISABLED for shared hosting deployment (port 1883 blocked)
     // None of the IoT devices use MQTT — they all use HTTP POST.
@@ -109,6 +111,9 @@ app.use('/api/v1/fusion-groups', fusionGroupRoutes);
 // OTA firmware updates (dashboard + devices; see routes/firmware.js)
 app.use('/api/v1/firmware', firmwareRoutes);
 app.use('/v1/firmware', firmwareRoutes);
+// Door locks (dashboard + lock hardware; see routes/locks.js)
+app.use('/api/v1/locks', lockRoutes);
+app.use('/v1/locks', lockRoutes);
 
 // Tap Device & Tag API Compatibility Routes
 app.use('/api/device', deviceRoutes);

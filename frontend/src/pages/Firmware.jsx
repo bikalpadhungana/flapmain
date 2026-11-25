@@ -18,6 +18,7 @@ const KNOWN_BOARDS = [
   { id: 'esp8266_ultrasonic_sensor', label: 'Ultrasonic sensor (ESP8266)', lora: false },
   { id: 'esp8266_water_tank', label: 'Water tank (ESP8266)', lora: false },
   { id: 'esp8266_flap_switch', label: 'Flap switch (ESP8266)', lora: false },
+  { id: 'esp8266_door_lock', label: 'Door lock (ESP8266)', lora: false },
 ];
 const boardLabel = (id) => KNOWN_BOARDS.find((b) => b.id === id)?.label || id;
 

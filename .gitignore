@@ -33,3 +33,6 @@ backend/firmware_store/
 
 # Per-board secrets (Wi-Fi passwords, device keys)
 secrets.h
+
+# Door lock settings (Wi-Fi password, device key)
+hardwarecode/esp8266_door_lock/config.h

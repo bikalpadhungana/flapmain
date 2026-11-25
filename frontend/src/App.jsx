@@ -16,6 +16,7 @@ import SosAlert from './pages/SosAlert';
 import CameraMonitor from './pages/CameraMonitor';
 import CardReader from './pages/CardReader';
 import Firmware from './pages/Firmware';
+import DoorLocks from './pages/DoorLocks';
 import './App.css';
 
 // Guard wrapper
@@ -163,6 +164,16 @@ function App() {
             <ProtectedRoute>
               <DashboardLayout>
                 <CardReader />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/door-locks"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <DoorLocks />
               </DashboardLayout>
             </ProtectedRoute>
           }
