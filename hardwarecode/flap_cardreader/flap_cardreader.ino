@@ -127,7 +127,12 @@ void showResult(const String& status,
     const char* hdr = "! CARD LOST";
     u8g2.drawStr(cx(hdr), 14, hdr);
     u8g2.setFont(u8g2_font_6x10_tf);
-  } else if (status == "defect") {
+  } else if (status == "denied") {
+    u8g2.setFont(u8g2_font_7x13B_tf);
+    const char* hdr = "x Not verified";
+    u8g2.drawStr(cx(hdr), 14, hdr);
+    u8g2.setFont(u8g2_font_6x10_tf);
+  } else if (status == "defect" || status == "defective") {
     u8g2.setFont(u8g2_font_7x13B_tf);
     const char* hdr = "!! DEFECT !!";
     u8g2.drawStr(cx(hdr), 14, hdr);
@@ -348,6 +353,147 @@ void setup() {
   showReadyScreen();
 }
 
+// ===================== PHONE AS FLAP CARD =====================
+// Phones (Flap app → Settings → Phone as Flap card) have a new random UID on every tap, so
+// the UID can't identify them. Instead this reader selects the private Flap app on the phone
+// (AID F0464C415001), sends a random 16-byte challenge, and forwards the phone's signed
+// answer { pid, challenge, ctr, mac } as "phone_auth". The Flap server checks the signature
+// and that the counter only goes up, so a copied or recorded tap can't be used again.
+
+enum PhoneResult { PHONE_OK, PHONE_NOT_FLAP, PHONE_COMM_ERROR };
+
+struct PhoneTap {
+  String pid;
+  String challenge; // 32 hex chars
+  uint32_t ctr;
+  String mac;       // 32 hex chars
+};
+
+static byte isoBlockNum = 0; // ISO 14443-4 block number, toggles 0/1
+
+String toHex(const byte* b, byte n) {
+  static const char* H = "0123456789abcdef";
+  String s; s.reserve(n * 2);
+  for (byte i = 0; i < n; i++) { s += H[b[i] >> 4]; s += H[b[i] & 0x0F]; }
+  return s;
+}
+
+// Hardware timeout for one frame: cards answer in ~5 ms, phones can take 100 ms or more
+void setRcTimeout(uint16_t ticks) { // 1 tick = 25 us (prescaler set by PCD_Init)
+  mfrc522.PCD_WriteRegister(MFRC522::TReloadRegH, ticks >> 8);
+  mfrc522.PCD_WriteRegister(MFRC522::TReloadRegL, ticks & 0xFF);
+}
+
+// One raw frame: append CRC_A, send, wait up to waitMs, check and strip the reply's CRC.
+// (MFRC522::PCD_TransceiveData gives up after 36 ms, too soon for some phones.)
+MFRC522::StatusCode rcFrame(const byte* data, byte len, byte* back, byte* backLen, uint16_t waitMs) {
+  byte tx[64];
+  if (len + 2 > sizeof(tx)) return MFRC522::STATUS_NO_ROOM;
+  memcpy(tx, data, len);
+  if (mfrc522.PCD_CalculateCRC(tx, len, tx + len) != MFRC522::STATUS_OK) return MFRC522::STATUS_CRC_WRONG;
+
+  mfrc522.PCD_WriteRegister(MFRC522::CommandReg, MFRC522::PCD_Idle);
+  mfrc522.PCD_WriteRegister(MFRC522::ComIrqReg, 0x7F);      // clear interrupt flags
+  mfrc522.PCD_WriteRegister(MFRC522::FIFOLevelReg, 0x80);   // flush FIFO
+  mfrc522.PCD_WriteRegister(MFRC522::FIFODataReg, len + 2, tx);
+  mfrc522.PCD_WriteRegister(MFRC522::BitFramingReg, 0x00);
+  mfrc522.PCD_WriteRegister(MFRC522::CommandReg, MFRC522::PCD_Transceive);
+  mfrc522.PCD_SetRegisterBitMask(MFRC522::BitFramingReg, 0x80); // StartSend
+
+  const uint32_t start = millis();
+  bool received = false;
+  while (millis() - start < waitMs) {
+    byte irq = mfrc522.PCD_ReadRegister(MFRC522::ComIrqReg);
+    if (irq & 0x30) { received = true; break; } // RxIRq | IdleIRq
+    if (irq & 0x01) return MFRC522::STATUS_TIMEOUT; // TimerIRq
+    yield();
+  }
+  if (!received) return MFRC522::STATUS_TIMEOUT;
+
+  byte err = mfrc522.PCD_ReadRegister(MFRC522::ErrorReg);
+  if (err & 0x13) return MFRC522::STATUS_ERROR; // BufferOvfl | ParityErr | ProtocolErr
+  byte n = mfrc522.PCD_ReadRegister(MFRC522::FIFOLevelReg);
+  if (n < 3 || n > *backLen) return MFRC522::STATUS_NO_ROOM;
+  mfrc522.PCD_ReadRegister(MFRC522::FIFODataReg, n, back, 0);
+  byte crc[2];
+  if (mfrc522.PCD_CalculateCRC(back, n - 2, crc) != MFRC522::STATUS_OK) return MFRC522::STATUS_CRC_WRONG;
+  if (back[n - 2] != crc[0] || back[n - 1] != crc[1]) return MFRC522::STATUS_CRC_WRONG;
+  *backLen = n - 2;
+  return MFRC522::STATUS_OK;
+}
+
+// Send one APDU in an ISO 14443-4 I-block; answers the phone's "wait" (S(WTX)) requests.
+// Returns the response APDU (data + SW1 SW2) without the protocol byte.
+bool isoApdu(const byte* apdu, byte len, byte* resp, byte* respLen) {
+  byte frame[60];
+  if (len + 1 > sizeof(frame)) return false;
+  frame[0] = 0x02 | isoBlockNum;
+  memcpy(frame + 1, apdu, len);
+  byte back[64]; byte backLen = sizeof(back);
+  if (rcFrame(frame, len + 1, back, &backLen, 300) != MFRC522::STATUS_OK) return false;
+
+  for (byte waits = 0; waits < 20; waits++) {
+    byte pcb = back[0];
+    if ((pcb & 0xF7) == 0xF2 && backLen >= 2) { // S(WTX): phone needs more time, say yes
+      byte wtx[2] = { 0xF2, (byte)(back[1] & 0x3F) };
+      backLen = sizeof(back);
+      if (rcFrame(wtx, 2, back, &backLen, 1000) != MFRC522::STATUS_OK) return false;
+      continue;
+    }
+    if ((pcb & 0xE2) == 0x02 && !(pcb & 0x10)) { // I-block, not chained
+      isoBlockNum ^= 1;
+      if (backLen - 1 > *respLen) return false;
+      *respLen = backLen - 1;
+      memcpy(resp, back + 1, *respLen);
+      return true;
+    }
+    return false; // R-block / chaining: not used by Flap phones
+  }
+  return false;
+}
+
+// Ask a tapped ISO-DEP device (phone) to prove it is a Flap phone card.
+PhoneResult readFlapPhone(PhoneTap& out) {
+  setRcTimeout(0xFFFF); // ~1.6 s hardware limit while talking to a phone; rcFrame's waitMs is the real limit
+  isoBlockNum = 0;
+  PhoneResult result = PHONE_COMM_ERROR;
+
+  // RATS: FSD 64 bytes, CID 0. Reply is the ATS.
+  byte rats[2] = { 0xE0, 0x50 };
+  byte ats[64]; byte atsLen = sizeof(ats);
+  if (rcFrame(rats, 2, ats, &atsLen, 300) == MFRC522::STATUS_OK) {
+    static const byte selectFlap[] = { 0x00, 0xA4, 0x04, 0x00, 0x06, 0xF0, 0x46, 0x4C, 0x41, 0x50, 0x01, 0x00 };
+    byte r[40]; byte rLen = sizeof(r);
+    if (isoApdu(selectFlap, sizeof(selectFlap), r, &rLen)) {
+      if (rLen >= 2 + 8 && r[rLen - 2] == 0x90 && r[rLen - 1] == 0x00 && r[0] == 0x01) {
+        out.pid = "";
+        for (byte i = 1; i < rLen - 2; i++) out.pid += (char)r[i];
+
+        byte apdu[5 + 16 + 1] = { 0x80, 0x10, 0x00, 0x00, 0x10 };
+        for (byte i = 0; i < 16; i += 4) { uint32_t v = ESP.random(); memcpy(apdu + 5 + i, &v, 4); } // hardware RNG
+        apdu[21] = 0x00;
+        byte a[40]; byte aLen = sizeof(a);
+        if (isoApdu(apdu, sizeof(apdu), a, &aLen) && aLen == 4 + 16 + 2 && a[20] == 0x90 && a[21] == 0x00) {
+          out.challenge = toHex(apdu + 5, 16);
+          out.ctr = ((uint32_t)a[0] << 24) | ((uint32_t)a[1] << 16) | ((uint32_t)a[2] << 8) | a[3];
+          out.mac = toHex(a + 4, 16);
+          result = PHONE_OK;
+        }
+      } else {
+        result = PHONE_NOT_FLAP; // phone/card answered, but has no (switched-on) Flap card
+      }
+    }
+    byte deselect[1] = { 0xC2 };
+    byte d[8]; byte dLen = sizeof(d);
+    rcFrame(deselect, 1, d, &dLen, 50);
+  }
+  setRcTimeout(0x03E8); // back to the library default (25 ms) for cards
+  return result;
+}
+
+// Android phones use a random 4-byte UID starting with 0x08
+bool looksLikePhone() { return mfrc522.uid.size == 4 && mfrc522.uid.uidByte[0] == 0x08; }
+
 // ===================== LOOP =====================
 void loop() {
   // Reconnect WiFi if dropped
@@ -370,6 +516,28 @@ void loop() {
     uid += String(mfrc522.uid.uidByte[i], HEX);
   }
   uid.toUpperCase();
+
+  // Phones and other ISO 14443-4 devices (SAK bit 0x20): try the Flap phone card first
+  PhoneTap phone;
+  bool isPhone = false;
+  if (mfrc522.uid.sak & 0x20) {
+    PhoneResult pr = readFlapPhone(phone);
+    if (pr == PHONE_OK) {
+      isPhone = true;
+      uid = "PHONE:" + phone.pid; // the phone's UID changes every tap; debounce on its Flap ID
+      Serial.println("[TAP] Flap phone " + phone.pid + " ctr=" + String(phone.ctr));
+    } else if (looksLikePhone()) {
+      mfrc522.PICC_HaltA();
+      showResult(pr == PHONE_NOT_FLAP ? "unknown" : "error",
+                 pr == PHONE_NOT_FLAP ? "Phone card is off" : "Hold phone still",
+                 pr == PHONE_NOT_FLAP ? "Flap > Settings >" : "Keep it on the",
+                 pr == PHONE_NOT_FLAP ? "Phone as Flap card" : "reader, try again");
+      delay(2500);
+      showReadyScreen();
+      return;
+    }
+    // Otherwise an ISO-DEP card without the Flap app: use its UID like any card
+  }
 
   // Debounce: ignore same card within cooldown window
   unsigned long now = millis();
@@ -394,12 +562,24 @@ void loop() {
 #if ARDUINOJSON_VERSION_MAJOR >= 7
   JsonDocument doc;
 #else
-  StaticJsonDocument<320> doc;
+  StaticJsonDocument<640> doc;
 #endif
   doc["flapid"]      = "";
   doc["uid"]         = uid;
   doc["tag_uid"]     = uid; // Add this for flapcard compatibility
   doc["type"]        = "card";
+  if (isPhone) {
+    doc["tag_type"] = "PHONE";
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+    JsonObject pa = doc["phone_auth"].to<JsonObject>();
+#else
+    JsonObject pa = doc.createNestedObject("phone_auth");
+#endif
+    pa["pid"]       = phone.pid;
+    pa["challenge"] = phone.challenge;
+    pa["ctr"]       = phone.ctr;
+    pa["mac"]       = phone.mac;
+  }
   doc["device_id"]   = DEVICE_ID;
   doc["api_key"]     = API_KEY;
 
@@ -475,7 +655,7 @@ void loop() {
   }
 
   // Show result on OLED screen
-  int displayMs = (status == "defect" || status == "lost") ? 6000 : 3500;
+  int displayMs = (status == "defect" || status == "defective" || status == "lost" || status == "denied") ? 6000 : 3500;
   showResult(status, line1, line2, line3);
   delay(displayMs);
 

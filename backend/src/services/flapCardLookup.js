@@ -82,4 +82,59 @@ const lookupCardHolder = async (rawUid) => {
   return { status: 'ok', uid: data.uid || uid, holder, message: 'OK' };
 };
 
-module.exports = { lookupCardHolder, normaliseUid };
+// Phones used as a Flap card have no fixed UID. The reader sends the phone's signed answer
+// to its random challenge, which Flap checks:
+//   POST https://flaap.me/api/device/external/check-phone   (X-API-Key header)
+//   body { pid, challenge, ctr, mac }
+// Extra result status: denied — bad signature or a replayed tap (do not grant access).
+const PHONE_LOOKUP_URL = process.env.FLAP_PHONE_LOOKUP_URL
+  || LOOKUP_URL.replace(/check-uid\/$/, 'check-phone');
+
+const HEX32 = /^[0-9a-f]{32}$/i;
+
+/** Only the four fields Flap needs, validated, so nothing else is passed along or stored. */
+const cleanPhoneAuth = (p) => {
+  if (!p || typeof p !== 'object') return null;
+  const out = { pid: String(p.pid || ''), challenge: String(p.challenge || '').toLowerCase(), ctr: Number(p.ctr), mac: String(p.mac || '').toLowerCase() };
+  if (!/^[A-Za-z0-9]{8,16}$/.test(out.pid) || !HEX32.test(out.challenge) || !HEX32.test(out.mac) || !Number.isInteger(out.ctr) || out.ctr < 1) return null;
+  return out;
+};
+
+const lookupPhoneHolder = async (rawAuth) => {
+  const auth = cleanPhoneAuth(rawAuth);
+  if (!auth) return { status: 'denied', uid: 'PHONE', holder: null, message: 'Malformed phone tap' };
+  const uid = `PHONE:${auth.pid}`;
+
+  const key = lookupKey();
+  if (!key) return { status: 'unverified', uid, holder: null, message: 'Lookup key not configured' };
+
+  let res;
+  try {
+    res = await fetch(PHONE_LOOKUP_URL, {
+      method: 'POST',
+      headers: { 'X-API-Key': key, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(auth),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (err) {
+    return { status: 'unverified', uid, holder: null, message: 'Could not reach Flap' };
+  }
+  const data = await res.json().catch(() => null);
+
+  if (res.status === 401) {
+    console.warn('[CARD LOOKUP] Flap rejected the API key (401). Check FLAP_LOOKUP_API_KEY.');
+    return { status: 'unverified', uid, holder: null, message: 'Lookup key rejected' };
+  }
+  if (res.status === 404 && data && data.code === 'not_found') return { status: 'unknown', uid, holder: null, message: data.message || 'Phone not registered' };
+  if (res.status === 404) return { status: 'unverified', uid, holder: null, message: 'Flap server does not support phone taps yet' };
+  if (res.status === 403 || res.status === 400) {
+    return { status: 'denied', uid, holder: null, message: (data && data.code === 'replayed_tap') ? 'Tap already used' : 'Phone not verified' };
+  }
+  if (!res.ok || !data) return { status: 'unverified', uid, holder: null, message: `Flap error (${res.status})` };
+
+  const holder = pickHolder(data);
+  if (data.isLost) return { status: 'lost', uid, holder, message: 'Phone switched off by owner', phone: true };
+  return { status: 'ok', uid, holder, message: 'OK', phone: true };
+};
+
+module.exports = { lookupCardHolder, lookupPhoneHolder, cleanPhoneAuth, normaliseUid };

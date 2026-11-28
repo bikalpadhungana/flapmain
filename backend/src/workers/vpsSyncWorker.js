@@ -21,7 +21,8 @@ const startVpsSyncWorker = () => {
 
   const runBatch = async () => {
     try {
-      const pendingTaps = await TapLog.find({ forwardedMain: false })
+      // Phone taps (uid PHONE:…) are skipped: their one-time signature can't be checked later
+      const pendingTaps = await TapLog.find({ forwardedMain: false, uid: { $not: /^PHONE:/ } })
         .select('+api_key')
         .sort({ timestamp: 1 })
         .limit(BATCH_SIZE);

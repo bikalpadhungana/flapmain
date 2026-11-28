@@ -19,7 +19,7 @@ const {
 const { deviceAuthMode } = require('../config/security');
 const { evaluateAlertRules } = require('../services/alertEngine');
 const { checkOutboundUrl, postJson } = require('../services/outboundUrl');
-const { lookupCardHolder } = require('../services/flapCardLookup');
+const { lookupCardHolder, lookupPhoneHolder, cleanPhoneAuth } = require('../services/flapCardLookup');
 const { readingTimeFrom, isDuplicatePacket, mergeHeardBy, heardByStale, recordDiscovery } = require('../services/meshIngest');
 const { parseMeshText, utf8Truncate, radioNodeOf, WALKIE_NAMES } = require('../services/meshText');
 const DiscoveredNode = require('../models/DiscoveredNode');
@@ -1277,7 +1277,12 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
   // @desc    Process RFID/NFC card tap event, save locally on laptop, & forward to servers
   // @access  Public
   router.post('/tap', async (req, res) => {
-    const rawUid = req.body.uid || req.body.tag_uid;
+    // Phone used as a Flap card: the reader sends its signed challenge answer instead of a UID
+    const phoneAuth = req.body.phone_auth ? cleanPhoneAuth(req.body.phone_auth) : null;
+    if (req.body.phone_auth && !phoneAuth) {
+      return res.status(400).json({ status: 'error', message: 'Malformed phone_auth' });
+    }
+    const rawUid = phoneAuth ? `PHONE:${phoneAuth.pid}` : (req.body.uid || req.body.tag_uid);
 
     if (!rawUid) {
       return res.status(400).json({ status: 'error', message: 'Missing tag UID' });
@@ -1320,9 +1325,11 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
       flapid: req.body.flapid,
       uid: uidStr,
       tag_uid: uidStr,
-      tag_type: req.body.tag_type || 'MIFARE',
+      tag_type: phoneAuth ? 'PHONE' : (req.body.tag_type || 'MIFARE'),
       type: req.body.type || 'checkin',
       timestamp: new Date(),
+      // Forwarded (edge mode) so the Flap server can check the phone too; never stored
+      ...(phoneAuth ? { phone_auth: phoneAuth } : {}),
     };
 
     console.log('[FLAPMAIN LOCAL TAP INGESTED]:', { ...tapPayload, api_key: tapPayload.api_key ? '***' : '' });
@@ -1380,7 +1387,7 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
 
     // Cardholder lookup via the Flap Card API runs in parallel with forwarding,
     // so the reader's HTTP timeout is not the sum of both.
-    const lookupPromise = lookupCardHolder(uidStr);
+    const lookupPromise = phoneAuth ? lookupPhoneHolder(phoneAuth) : lookupCardHolder(uidStr);
 
     // Target 1: Local Device API (only used in edge/local mode)
     const localTargetUrl = process.env.TAP_DEVICE_TARGET_URL || '';
@@ -1576,7 +1583,7 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
   });
 
   // Map a Flap Card API lookup to the reader's status + 3 OLED lines (21 chars each).
-  // Status values match flap_cardreader.ino showResult(): success | lost | defective | unknown.
+  // Status values match flap_cardreader.ino showResult(): success | lost | defective | unknown | denied.
   // 'unverified' returns null so the legacy VPS response is used instead.
   function readerResultFromLookup(lookup, uid, forwarded) {
     const cut = (v) => String(v || '').slice(0, 21);
@@ -1585,7 +1592,11 @@ router.get('/:device_id/export', authenticateUser, async (req, res) => {
       case 'ok':
         return { status: 'success', display: { line1: cut(h.name || h.flapid), line2: cut(h.flapid), line3: forwarded ? 'Check-in saved' : 'Saved offline' } };
       case 'lost':
+        if (lookup.phone) return { status: 'lost', display: { line1: cut(h.name || uid), line2: 'Phone switched off', line3: 'Use your Flap card' } };
         return { status: 'lost', display: { line1: cut(h.name || uid), line2: 'Reported lost', line3: 'Contact the owner' } };
+      case 'denied':
+        // Phone tap with a bad signature or one that was already used: never grant access
+        return { status: 'denied', display: { line1: 'Phone not verified', line2: cut(lookup.message), line3: 'Tap again' } };
       case 'defective':
         return { status: 'defective', display: { line1: 'Defective card', line2: cut(uid), line3: 'Contact Flap' } };
       case 'unknown':
